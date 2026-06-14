@@ -1,0 +1,10 @@
+version: '3.8'
+
+services:
+  coturn:
+    image: coturn/coturn:latest
+    container_name: dhambaal-relay
+    network_mode: "host"
+    volumes:
+      - ./turnserver.conf:/etc/coturn/turnserver.conf
+    restart: unless-stopped
