@@ -26,7 +26,7 @@ import { listenToActiveChats, listenToMessages, sendMessage as sendMessageServic
 import { connectToPeer } from '../../src/services/connection';
 import { MadaxaMobilka } from '../../src/components/MadaxaMobilka';
 import { VoiceNotePreview } from '../../src/components/VoiceNotePreview';
-import { startRecording, stopRecording, readAudioAsBase64, playVoiceNote, stopSound } from '../../src/services/voiceNotes';
+import { startRecording, stopRecording, readAudioAsBase64, playVoiceNote, stopSound, getVoicePlaybackUri } from '../../src/services/voiceNotes';
 import { cleanupExpired, getVoiceAudio, getVoiceMimeType, getAutoDeleteAt, setAutoDeleteAt } from '../../src/services/voiceStorage';
 
 /**
@@ -78,6 +78,7 @@ function WebChatPanel({ chat, styles }: { chat: ChatItem, styles: any }) {
   const [messages, setMessages] = useState<any[]>([]);
   const [webMsgText, setWebMsgText] = useState('');
   const flatListRef = useRef<FlatList>(null);
+  const router = useRouter();
 
   useEffect(() => {
     if (messages.length > 0) {
@@ -248,10 +249,8 @@ function WebChatPanel({ chat, styles }: { chat: ChatItem, styles: any }) {
       currentSoundRef.current = null;
     }
 
-    const base64 = getVoiceAudio(voiceNote.msgId);
-    if (!base64) return;
-    const mimeType = getVoiceMimeType(voiceNote.msgId) || 'audio/m4a';
-    const uri = `data:${mimeType};base64,${base64}`;
+    const uri = await getVoicePlaybackUri(voiceNote);
+    if (!uri) return;
     const sound = await playVoiceNote(uri);
     currentSoundRef.current = sound;
     setActiveVoiceMsgId(voiceNote.msgId);
@@ -385,9 +384,20 @@ function WebChatPanel({ chat, styles }: { chat: ChatItem, styles: any }) {
           </View>
         </View>
         <View style={{ flexDirection: 'row', gap: Spacing.xs }}>
-          {[{name: 'call-outline' as const, key: 'call'}, {name: 'information-circle-outline' as const, key: 'info'}].map((icon) => (
-            <TouchableOpacity key={icon.key} style={styles.webActionBtn}><Ionicons name={icon.name} size={18} color={Colors.onSurface} /></TouchableOpacity>
-          ))}
+          <TouchableOpacity style={styles.webActionBtn} onPress={async () => {
+            try {
+              await navigator.mediaDevices.getUserMedia({ audio: true });
+            } catch (e) {
+              alert('Fadlan ogolow makarafoonka si aad u wacdo.');
+              return;
+            }
+            router.push(`/otherPages/OutgoingCall?id=${encodeURIComponent(chat.id)}&name=${encodeURIComponent(chat.name || 'Unknown')}`);
+          }}>
+            <Ionicons name="call-outline" size={18} color={Colors.onSurface} />
+          </TouchableOpacity>
+          <TouchableOpacity style={styles.webActionBtn}>
+            <Ionicons name="information-circle-outline" size={18} color={Colors.onSurface} />
+          </TouchableOpacity>
         </View>
       </View>
 

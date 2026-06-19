@@ -158,8 +158,21 @@ export const getVoicePlaybackUri = async (voiceNote) => {
   if (Platform.OS === 'web' && voiceNote.msgId) {
     try {
       const base64 = voiceStorage.getVoiceAudio(voiceNote.msgId);
-      const mimeType = voiceStorage.getVoiceMimeType(voiceNote.msgId) || 'audio/m4a';
-      if (base64) return `data:${mimeType};base64,${base64}`;
+      let mimeType = voiceStorage.getVoiceMimeType(voiceNote.msgId) || 'audio/m4a';
+      if (mimeType === 'audio/m4a') mimeType = 'audio/mp4'; // Fallback to mp4 container
+      
+      if (base64) {
+        // Convert to Blob URL for better browser compatibility
+        const byteCharacters = atob(base64);
+        const byteNumbers = new Array(byteCharacters.length);
+        for (let i = 0; i < byteCharacters.length; i++) {
+          byteNumbers[i] = byteCharacters.charCodeAt(i);
+        }
+        const byteArray = new Uint8Array(byteNumbers);
+        // Try audio/mp4, if the browser rejects it, the Audio tag is more lenient with Blobs
+        const blob = new Blob([byteArray], { type: mimeType });
+        return URL.createObjectURL(blob);
+      }
     } catch (e) {
       return null;
     }

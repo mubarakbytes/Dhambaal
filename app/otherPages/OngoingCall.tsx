@@ -1,33 +1,97 @@
 import React, { useEffect, useState, useRef } from 'react';
-import { View, Text, TouchableOpacity, StyleSheet, SafeAreaView, Platform } from 'react-native';
+import { View, Text, TouchableOpacity, StyleSheet, SafeAreaView, Platform, AppState } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { Colors } from '../../src/theme/colors';
 import { Typography } from '../../src/theme/typography';
-import { endCall, toggleMute, setCallCallbacks, getRemoteStream } from '../../src/services/callService';
+import { StatusChip } from '../../src/components/StatusChip';
+import {
+  endCall,
+  toggleMute,
+  toggleSpeaker,
+  setCallCallbacks,
+  getRemoteStream,
+  answerCall,
+  getPendingOfferSdp,
+  getPersistedOfferSdp,
+  getCallConnectionStatusForPeer,
+  registerCallConnectionStatusListener,
+  isMicrophoneMuted,
+  isSpeakerOn as getSpeakerState,
+} from '../../src/services/callService';
+import { stopRingtone } from '../../src/services/ringtone';
 
 export default function OngoingCall() {
-  const { id, name } = useLocalSearchParams<{ id: string; name: string }>();
+  const { id, name, autoAnswer } = useLocalSearchParams<{ id: string; name: string; autoAnswer?: string }>();
   const router = useRouter();
   const [duration, setDuration] = useState(0);
-  const [isMuted, setIsMuted] = useState(false);
+  const [isMuted, setIsMuted] = useState(() => isMicrophoneMuted());
+  const [isSpeakerOn, setIsSpeakerOn] = useState(() => getSpeakerState());
+  const [connectionStatus, setConnectionStatus] = useState('connecting');
   
-  // NOTE: On native, if we need to route audio to the speaker, we'd use `react-native-webrtc` RTCView 
-  // or Audio routing methods. For pure audio, the stream usually plays automatically on the earpiece.
+  // NOTE: For pure audio calls, react-native-webrtc automatically routes the audio 
+  // track to the hardware speaker/earpiece. We DO NOT need an RTCView, which is a heavy 
+  // SurfaceView that can throttle or freeze the UI thread on some Android devices.
+  const [remoteStreamState, setRemoteStreamState] = useState<any>(null);
 
   const audioRef = useRef<any>(null);
   const startTime = useRef(Date.now());
 
   useEffect(() => {
+    stopRingtone();
+    if (!id) {
+      return;
+    }
+
+    setIsMuted(isMicrophoneMuted());
+    setIsSpeakerOn(getSpeakerState());
+
+    setConnectionStatus(getCallConnectionStatusForPeer(id));
+
+    const unsubscribeConnectionStatus = registerCallConnectionStatusListener((peerKey, status) => {
+      if (peerKey === id) {
+        setConnectionStatus(status);
+      }
+    });
+
     // Start duration timer based on actual elapsed time
     const interval = setInterval(() => {
       setDuration(Math.floor((Date.now() - startTime.current) / 1000));
     }, 1000);
 
+    // If navigated from a background notification "Qabo" tap, answer here in the foreground
+    if (autoAnswer === 'true') {
+      (async () => {
+        // Try in-memory first, then AsyncStorage (notification intent may have dropped SDP)
+        let pendingSdp = getPendingOfferSdp();
+        if (!pendingSdp) {
+          const persisted = await getPersistedOfferSdp();
+          if (persisted && persisted.sdp) {
+            pendingSdp = persisted.sdp;
+          }
+        }
+        if (pendingSdp) {
+          // Only request microphone when the app is truly active to prevent fatal native crashes
+          if (AppState.currentState === 'active') {
+            setTimeout(() => answerCall(id, pendingSdp), 500);
+          } else {
+            const subscription = AppState.addEventListener('change', (nextState) => {
+              if (nextState === 'active') {
+                setTimeout(() => answerCall(id, pendingSdp), 500);
+                subscription.remove();
+              }
+            });
+          }
+        }
+      })();
+    }
+
     const attachStream = (stream: any) => {
       if (Platform.OS === 'web' && audioRef.current && stream) {
         audioRef.current.srcObject = stream;
         audioRef.current.play().catch((e: any) => console.warn('Audio play failed:', e));
+      } else if (Platform.OS !== 'web' && stream) {
+        setRemoteStreamState(stream);
       }
     };
 
@@ -49,13 +113,17 @@ export default function OngoingCall() {
       attachStream(getRemoteStream());
     }, 500);
 
-    return () => clearInterval(interval);
+    return () => {
+      clearInterval(interval);
+      unsubscribeConnectionStatus();
+    };
   }, []);
 
   const formatDuration = (seconds: number) => {
     const m = Math.floor(seconds / 60);
     const s = seconds % 60;
-    return `${m}:${s < 10 ? '0' : ''}${s}`;
+    // Format strictly as 00:00 to prevent user confusion
+    return `${m < 10 ? '0' : ''}${m}:${s < 10 ? '0' : ''}${s}`;
   };
 
   const handleHangUp = () => {
@@ -72,6 +140,11 @@ export default function OngoingCall() {
     setIsMuted(muted);
   };
 
+  const handleSpeaker = () => {
+    const on = toggleSpeaker();
+    setIsSpeakerOn(on);
+  };
+
   return (
     <SafeAreaView style={styles.container}>
       <View style={styles.content}>
@@ -80,9 +153,12 @@ export default function OngoingCall() {
         </View>
         <Text style={styles.name}>{name || 'Unknown'}</Text>
         <Text style={styles.status}>{formatDuration(duration)}</Text>
+        <View style={styles.connectionBadgeRow}>
+          <StatusChip connectionStatus={connectionStatus} />
+        </View>
       </View>
 
-      {/* Since we don't need video, we don't render RTCView. WebRTC native will route audio automatically. */}
+      {/* For Web, we use standard HTML Audio. For Native, audio is automatically routed by the WebRTC engine. */}
       {Platform.OS === 'web' && (
         <audio ref={audioRef} autoPlay playsInline style={{ position: 'absolute', opacity: 0, width: 0, height: 0 }} />
       )}
@@ -96,8 +172,8 @@ export default function OngoingCall() {
           <Ionicons name="call" size={32} color="#fff" style={{ transform: [{ rotate: '135deg' }] }} />
         </TouchableOpacity>
         
-        <TouchableOpacity style={styles.controlButton}>
-          <Ionicons name="volume-high" size={28} color="#fff" />
+        <TouchableOpacity style={[styles.controlButton, isSpeakerOn && styles.controlButtonActive]} onPress={handleSpeaker}>
+          <Ionicons name={isSpeakerOn ? "volume-high" : "volume-low-outline"} size={28} color="#fff" />
         </TouchableOpacity>
       </View>
     </SafeAreaView>
@@ -133,11 +209,19 @@ const styles = StyleSheet.create({
     color: '#fff',
     fontFamily: Typography.bold,
     marginBottom: 8,
+    textAlign: 'center',
+    width: '100%',
   },
   status: {
     fontSize: 20,
     color: 'rgba(255,255,255,0.9)',
     fontFamily: Typography.medium,
+    textAlign: 'center',
+    width: '100%',
+    fontVariant: ['tabular-nums'],
+  },
+  connectionBadgeRow: {
+    marginTop: 12,
   },
   controls: {
     flexDirection: 'row',

@@ -1,24 +1,43 @@
 import React, { useEffect, useState } from 'react';
-import { View, Text, TouchableOpacity, StyleSheet, SafeAreaView, Platform } from 'react-native';
+import { View, Text, TouchableOpacity, StyleSheet, SafeAreaView, Platform, Vibration } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { Colors } from '../../src/theme/colors';
 import { Typography } from '../../src/theme/typography';
-import { answerCall, rejectCall, setCallCallbacks } from '../../src/services/callService';
+import { StatusChip } from '../../src/components/StatusChip';
+import {
+  answerCall,
+  rejectCall,
+  setCallCallbacks,
+  getPendingOfferSdp,
+  getCallConnectionStatusForPeer,
+  registerCallConnectionStatusListener,
+} from '../../src/services/callService';
 import { getStoredContacts } from '../../src/services/storage';
+import { playIncomingRingtone, stopRingtone } from '../../src/services/ringtone';
 
 export default function IncomingCall() {
-  const { id, sdp } = useLocalSearchParams<{ id: string; sdp: string }>();
+  const { id } = useLocalSearchParams<{ id: string }>();
   const router = useRouter();
   const [callerName, setCallerName] = useState('Unknown');
+  const [sdp, setSdp] = useState<string | null>(null);
+  const [connectionStatus, setConnectionStatus] = useState('connecting');
 
   useEffect(() => {
-    if (!id || !sdp) {
+    const pendingSdp = getPendingOfferSdp();
+    if (!id || !pendingSdp) {
       router.back();
       return;
     }
+    setSdp(pendingSdp);
+    setConnectionStatus(getCallConnectionStatusForPeer(id));
 
-    // Lookup contact name
+    const unsubscribeConnectionStatus = registerCallConnectionStatusListener((peerKey, status) => {
+      if (peerKey === id) {
+        setConnectionStatus(status);
+      }
+    });
+
     getStoredContacts().then(contacts => {
       const contact = contacts.find(c => c.id === id);
       if (contact) {
@@ -26,13 +45,18 @@ export default function IncomingCall() {
       }
     });
 
+    Vibration.vibrate([1000, 2000], true);
+    playIncomingRingtone();
+
     setCallCallbacks(
       (stream) => {
-        // Stream received after answering, redirect to ongoing
-        router.replace(`/otherPages/OngoingCall?id=${encodeURIComponent(id)}&name=${encodeURIComponent(callerName)}`);
+        stopRingtone();
+        Vibration.cancel();
+        router.replace(`/otherPages/OngoingCall?id=${id}&name=${encodeURIComponent(callerName)}`);
       },
       () => {
-        // Call ended by caller before we answered
+        stopRingtone();
+        Vibration.cancel();
         if (router.canGoBack()) {
           router.back();
         } else {
@@ -40,14 +64,25 @@ export default function IncomingCall() {
         }
       }
     );
-  }, [id, sdp]);
+
+    return () => {
+      stopRingtone();
+      Vibration.cancel();
+      unsubscribeConnectionStatus();
+    };
+  }, [id]);
 
   const handleAnswer = () => {
+    if (!sdp) return;
+    stopRingtone();
+    Vibration.cancel();
     answerCall(id, sdp);
-    router.replace(`/otherPages/OngoingCall?id=${encodeURIComponent(id)}&name=${encodeURIComponent(callerName)}`);
+    router.replace(`/otherPages/OngoingCall?id=${id}&name=${encodeURIComponent(callerName)}`);
   };
 
   const handleDecline = () => {
+    stopRingtone();
+    Vibration.cancel();
     rejectCall(id);
     if (router.canGoBack()) {
       router.back();
@@ -64,6 +99,9 @@ export default function IncomingCall() {
         </View>
         <Text style={styles.name}>{callerName}</Text>
         <Text style={styles.status}>Wicitaan Soo Socda...</Text>
+        <View style={styles.connectionBadgeRow}>
+          <StatusChip connectionStatus={connectionStatus} />
+        </View>
       </View>
 
       <View style={styles.controls}>
@@ -110,11 +148,18 @@ const styles = StyleSheet.create({
     color: '#fff',
     fontFamily: Typography.bold,
     marginBottom: 8,
+    textAlign: 'center',
+    width: '100%',
   },
   status: {
     fontSize: 16,
     color: 'rgba(255,255,255,0.7)',
     fontFamily: Typography.regular,
+    textAlign: 'center',
+    width: '100%',
+  },
+  connectionBadgeRow: {
+    marginTop: 12,
   },
   controls: {
     flexDirection: 'row',
@@ -137,7 +182,7 @@ const styles = StyleSheet.create({
     shadowOffset: { width: 0, height: 4 },
   },
   answerButton: {
-    backgroundColor: '#34C759', // Green for Answer
+    backgroundColor: '#34C759',
     shadowColor: '#34C759',
     shadowOpacity: 0.4,
     shadowRadius: 10,

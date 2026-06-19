@@ -43,12 +43,19 @@ export function VoiceNotePreview({ visible, recordingUri, duration, onSend, onCa
       soundRef.current = sound;
       setIsPlaying(true);
 
-      sound.setOnPlaybackStatusUpdate((status: any) => {
-        if (status.isLoaded && status.didJustFinish) {
+      if (Platform.OS === 'web') {
+        sound.onended = () => {
           setIsPlaying(false);
           soundRef.current = null;
-        }
-      });
+        };
+      } else if (sound.setOnPlaybackStatusUpdate) {
+        sound.setOnPlaybackStatusUpdate((status: any) => {
+          if (status.isLoaded && status.didJustFinish) {
+            setIsPlaying(false);
+            soundRef.current = null;
+          }
+        });
+      }
     } catch (e) {
       console.error('[VoiceNotePreview] Playback error:', e);
     }

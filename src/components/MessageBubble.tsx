@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState, memo } from 'react';
 import { View, Text, StyleSheet, TouchableOpacity, Platform, Image, Linking } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { Colors } from '../theme/colors';
@@ -29,9 +29,11 @@ interface MessageBubbleProps {
   onPlayVoiceNote?: (voiceNote: VoiceNoteProps) => void;
   onDownloadVoiceNote?: (voiceNote: VoiceNoteProps) => void;
   onLongPress?: () => void;
+  highlight?: string;
+  isSearchMatch?: boolean;
 }
 
-export function MessageBubble({
+export const MessageBubble = memo(function MessageBubble({
   text,
   time,
   type,
@@ -46,6 +48,8 @@ export function MessageBubble({
   onPlayVoiceNote,
   onDownloadVoiceNote,
   onLongPress,
+  highlight = '',
+  isSearchMatch = false,
 }: MessageBubbleProps) {
   const isSent = type === 'sent';
   const isWeb = Platform.OS === 'web';
@@ -257,7 +261,10 @@ export function MessageBubble({
       )}
 
       <TouchableOpacity 
-        style={isSent ? styles.sentBubble : [styles.receivedBubble, webBlur]}
+        style={[
+          isSent ? styles.sentBubble : [styles.receivedBubble, webBlur],
+          isSearchMatch && { borderLeftWidth: 3, borderLeftColor: '#fde047' }
+        ]}
         activeOpacity={0.8}
         onLongPress={onLongPress}
         delayLongPress={500}
@@ -266,7 +273,18 @@ export function MessageBubble({
           <Text style={styles.senderName}>{senderName}</Text>
         )}
 
-        {!!text && <Text style={isSent ? styles.sentText : styles.receivedText}>{text}</Text>}
+        {!!text && (
+          <Text style={isSent ? styles.sentText : styles.receivedText}>
+            {highlight && isSearchMatch && text.toLowerCase().includes(highlight.toLowerCase())
+              ? text.split(new RegExp(`(${highlight.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')})`, 'gi')).map((part, i) =>
+                  part.toLowerCase() === highlight.toLowerCase()
+                    ? <Text key={i} style={{ backgroundColor: '#fde047', color: '#1c1917' }}>{part}</Text>
+                    : part
+                )
+              : text
+            }
+          </Text>
+        )}
 
         {file && (
           <TouchableOpacity onPress={handleOpenFile} activeOpacity={0.7} style={{ marginTop: text ? 8 : 0 }}>
@@ -380,4 +398,4 @@ export function MessageBubble({
       </TouchableOpacity>
     </View>
   );
-}
+});

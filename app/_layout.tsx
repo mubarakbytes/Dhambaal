@@ -1,8 +1,8 @@
 import '../src/services/polyfills';
 import '../src/services/messages';
 import '../src/services/contactRequests';
-import { Stack, SplashScreen, useRouter } from 'expo-router'; // 1. Added useRouter
-import { useEffect, useState } from 'react';
+import { Stack, SplashScreen, useRouter, useRootNavigationState } from 'expo-router';
+import React, { useEffect, useState } from 'react';
 import { StatusBar } from 'expo-status-bar';
 import { Platform, AppState, AppStateStatus } from 'react-native';
 import { ThemeProvider, DarkTheme, DefaultTheme } from 'expo-router/react-navigation';
@@ -10,7 +10,17 @@ import { Colors, subscribeTheme, setTheme } from '../src/theme/colors';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { startSignalingListener, startPresenceEngine, syncPendingDirectMessages } from '../src/services/connection';
 import { EventType } from '@notifee/react-native';
-import { handleReject } from '../src/services/callService';
+import { getStoredContacts } from '../src/services/storage';
+import {
+  rejectCall,
+  setPendingOfferSdp,
+  getPendingOfferSdp,
+  getAndClearPendingCallAction,
+  storePendingCallAction,
+  getPersistedOfferSdp,
+  storePendingRejectCall,
+  getAndClearPendingRejectCall,
+} from '../src/services/callService';
 
 // Safe Notifee Import
 let notifee: any = null;
@@ -24,6 +34,74 @@ try {
 
 import * as IntentLauncher from 'expo-intent-launcher';
 
+const buildIncomingCallRoute = (friendPubKey: string) => {
+  return `/otherPages/IncomingCall?id=${encodeURIComponent(friendPubKey)}`;
+};
+
+const buildOngoingCallRoute = (friendPubKey: string, callerName: string) => {
+  return `/otherPages/OngoingCall?id=${encodeURIComponent(friendPubKey)}&name=${encodeURIComponent(callerName)}&autoAnswer=true`;
+};
+
+const resolveCallerName = async (friendPubKey: string) => {
+  try {
+    const contacts = await getStoredContacts();
+    const contact = contacts.find((item) => item.id === friendPubKey);
+    return contact?.name?.trim() || 'Unknown';
+  } catch (error) {
+    console.warn('[Layout] Could not resolve caller name:', error);
+    return 'Unknown';
+  }
+};
+
+const resolveIncomingCallSdp = async (notification: any) => {
+  const cached = getPendingOfferSdp();
+  if (cached) {
+    return cached;
+  }
+
+  const persisted = await getPersistedOfferSdp();
+  if (persisted && persisted.sdp) {
+    return persisted.sdp;
+  }
+
+  return notification && notification.data ? notification.data.offerSdp : null;
+};
+
+const prepareIncomingCallAction = async (notification: any, actionId: string) => {
+  if (!notification || !notification.data || !notification.data.friendPubKey) {
+    return null;
+  }
+
+  const friendPubKey = notification.data.friendPubKey;
+
+  if (actionId === 'reject') {
+    await notifee.cancelNotification(notification.id).catch(() => {});
+    await storePendingRejectCall(friendPubKey);
+    return null;
+  }
+
+  const offerSdp = await resolveIncomingCallSdp(notification);
+  if (!offerSdp) {
+    console.warn('[Layout] No SDP found for incoming call action:', actionId);
+    return null;
+  }
+
+  setPendingOfferSdp(offerSdp);
+
+  const route =
+    actionId === 'answer'
+      ? buildOngoingCallRoute(friendPubKey, await resolveCallerName(friendPubKey))
+      : buildIncomingCallRoute(friendPubKey);
+
+  await storePendingCallAction({
+    route,
+    autoAnswer: actionId === 'answer',
+  });
+  await notifee.cancelNotification(notification.id).catch(() => {});
+
+  return route;
+};
+
 // Diwaangeli Foreground Service-ka (Wuxuu ilaaliyaa in JS Thread-ku uusan seexan)
 if (notifee) {
   notifee.registerForegroundService((notification) => {
@@ -36,12 +114,44 @@ if (notifee) {
   notifee.onBackgroundEvent(async ({ type, detail }) => {
     console.log('[Background] Notifee Background Event:', type);
     const { notification, pressAction } = detail;
-    if (notification && notification.data && notification.data.friendPubKey) {
-      if (type === EventType.ACTION_PRESS && pressAction.id === 'reject') {
-        await handleReject();
-        await notifee.cancelNotification(notification.id);
+    if (type === EventType.ACTION_PRESS || type === EventType.PRESS) {
+      const actionId = type === EventType.ACTION_PRESS ? (pressAction ? pressAction.id : 'default') : 'default';
+      await prepareIncomingCallAction(notification, actionId);
+    } else if (type === EventType.DISMISSED || type === EventType.TIMEOUT) {
+      // Waa la iska aamusiyay (ama waa dhamaaday waqtigii) wicitaanka
+      console.log('[Background] Call dismissed or timed out');
+      if (notification && notification.data && notification.data.friendPubKey) {
+        await storePendingRejectCall(notification.data.friendPubKey);
+        try {
+          // Clear internal states
+          rejectCall(notification.data.friendPubKey).catch(() => {});
+        } catch (e) {}
       }
-      // Answer action will launch the app, and we'll handle getInitialNotification in useEffect
+    } else if (type === EventType.BOOT_COMPLETED) {
+      console.log('[Background] Phone rebooted! Starting background services...');
+      try {
+        const publicKey = await AsyncStorage.getItem('PUBLICK_KEY');
+        if (publicKey) {
+          startSignalingListener();
+          await startPresenceEngine();
+          
+          const channelId = await notifee.createChannel({
+            id: 'dhambaal_bg',
+            name: 'Dhambaal Background Service',
+          });
+          
+          await notifee.displayNotification({
+            title: 'Dhambaal waa Furan yahay',
+            body: 'Dhegeysanayaa fariimaha cusub (P2P)...',
+            android: {
+              channelId,
+              asForegroundService: true,
+            },
+          });
+        }
+      } catch (err) {
+        console.error('[Background] Failed to boot services:', err);
+      }
     }
   });
 }
@@ -53,11 +163,15 @@ export default function RootLayout() {
   const isNewArch = typeof (global as any).RN$Bridgeless !== 'undefined' || typeof (global as any).nativeFabricUIManager !== 'undefined';
   console.log('[Native Check] New Architecture enabled in running APK:', isNewArch);
 
-  const router = useRouter(); // 2. Initialize router
+  const router = useRouter();
+  const rootNavigationState = useRootNavigationState();
   const fontsLoaded = true;
   const fontError = null;
   const [themeTick, setThemeTick] = useState(0);
   const [isReady, setIsReady] = useState(false); // Changed name to general setup readiness
+  const [initialRoute, setInitialRoute] = useState<string | null>(null);
+  const isNavigationReadyRef = React.useRef(false);
+  isNavigationReadyRef.current = !!rootNavigationState?.key;
 
   // Bilow adeegyada P2P-ka iyo joogitaanka (Presence System) marka uu jiro furaha guud
   useEffect(() => {
@@ -135,16 +249,20 @@ export default function RootLayout() {
     if (!notifee) return;
 
     const handleCallAction = async (notification, actionId) => {
-      if (!notification || !notification.data || !notification.data.friendPubKey) return;
-      const pubKey = notification.data.friendPubKey;
-      const sdp = notification.data.offerSdp;
-      
-      if (actionId === 'reject') {
-        await handleReject();
-        await notifee.cancelNotification(notification.id);
-      } else if (actionId === 'answer' || actionId === 'default') {
-        await notifee.cancelNotification(notification.id);
-        router.push(`/otherPages/IncomingCall?id=${encodeURIComponent(pubKey)}&sdp=${encodeURIComponent(sdp)}`);
+      const route = await prepareIncomingCallAction(notification, actionId);
+      if (!route) {
+        if (actionId === 'reject' && notification && notification.data && notification.data.friendPubKey) {
+          try {
+            rejectCall(notification.data.friendPubKey);
+          } catch (_) {}
+        }
+        return;
+      }
+
+      if (!isNavigationReadyRef.current) {
+        setInitialRoute(route);
+      } else {
+        router.push(route);
       }
     };
 
@@ -180,15 +298,25 @@ export default function RootLayout() {
         const displayName = await AsyncStorage.getItem('DISPLAY_NAME');
 
         const userExists = publicKey !== null && displayName !== null;
-        alert(`User existence check: ${userExists ? 'User found' : 'No user found'}`);
 
+        // 3. Process any pending reject from background notification action
+        const pendingReject = await getAndClearPendingRejectCall();
+        if (pendingReject) {
+          console.log('[Layout] Processing pending reject call:', pendingReject.substring(0, 12));
+          rejectCall(pendingReject).catch(() => {});
+        }
 
-        // 3. Handle Routing Redirection based on user existence
+        // 4. Handle Routing Redirection based on user existence
         if (!userExists) {
-          // Redirect to the root index.jsx immediately before revealing the UI
-          router.replace('/'); 
+          setInitialRoute(prev => prev || '/'); 
         } else {
-          router.replace('/(tabs)/fariimaha'); // Redirect to main tabs if user exists
+          // Check if there's a pending call from a notification tap
+          const pendingCall = await getAndClearPendingCallAction();
+          if (pendingCall && pendingCall.route) {
+            setInitialRoute(pendingCall.route);
+          } else {
+            setInitialRoute(prev => prev || '/(tabs)/fariimaha');
+          }
         }
       } catch (err) {
         console.error('Error bootstrapping app:', err);
@@ -199,6 +327,14 @@ export default function RootLayout() {
     bootstrapApp();
   }, []);
 
+  // Execute redirection ONLY AFTER the layout has fully mounted
+  useEffect(() => {
+    if (isReady && initialRoute && rootNavigationState?.key) {
+      router.replace(initialRoute);
+      setInitialRoute(null);
+    }
+  }, [isReady, initialRoute, rootNavigationState?.key]);
+
   // Listen to live theme changes during app session
   useEffect(() => {
     const unsubscribe = subscribeTheme(() => {
@@ -207,21 +343,19 @@ export default function RootLayout() {
     return unsubscribe;
   }, []);
 
-  // Inject font on web environment safely
+  // Preload Ionicons on web to prevent fontfaceobserver timeouts
   useEffect(() => {
     if (Platform.OS !== 'web') return;
-    let link: HTMLLinkElement | null = null;
-    try {
-      link = document.createElement('link');
-      link.rel = 'stylesheet';
-      link.href = 'https://googleapis.com';
-      document.head.appendChild(link);
-    } catch (_) {}
-    return () => {
-      if (link && document.head.contains(link)) {
-        document.head.removeChild(link);
+    const loadWebFonts = async () => {
+      try {
+        const { Ionicons } = require('@expo/vector-icons');
+        const Font = require('expo-font');
+        await Font.loadAsync(Ionicons.font);
+      } catch (e) {
+        console.warn('Failed to load Web fonts', e);
       }
     };
+    loadWebFonts();
   }, []);
 
   // Hide splash screen only when both fonts and bootstrap logic are finished
@@ -230,11 +364,6 @@ export default function RootLayout() {
       SplashScreen.hideAsync();
     }
   }, [fontsLoaded, fontError, isReady]);
-
-  // Keep screen blank behind splash screen until setup is fully ready
-  if (!isReady) {
-    return null;
-  }
 
   const isLight = Colors.background === '#f4f6f8'; 
 

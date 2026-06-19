@@ -11,6 +11,7 @@ import './polyfills';
 import { Platform } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { getStoredContacts, updateContactInDatabase, getCleanPublicKey, gun } from './storage';
+import { getIceServers, recordRelayAttempt } from './iceServers';
 import {
   connectToSignalingBroker,
   publishSignal,
@@ -50,53 +51,6 @@ if (Platform.OS === 'web') {
   }
 }
 
-// ===================== ICE SERVER CONFIG (STUN & TURN) =====================
-const DEFAULT_TURN_SERVERS = [
-  {
-    urls: 'turn:openrelay.metered.ca:80',
-    username: 'openrelayproject',
-    credential: 'openrelayproject'
-  },
-  {
-    urls: 'turn:openrelay.metered.ca:443',
-    username: 'openrelayproject',
-    credential: 'openrelayproject'
-  }
-];
-
-export const getIceServers = async (forceDefaultTurn = false) => {
-  const servers = [
-    { urls: 'stun:stun.l.google.com:19302' },
-    { urls: 'stun:stun1.l.google.com:19302' },
-    { urls: 'stun:stun.cloudflare.com:3478' },
-  ];
-
-  if (forceDefaultTurn) {
-    return { iceServers: [...servers, ...DEFAULT_TURN_SERVERS] };
-  }
-
-  try {
-    const customStr = await AsyncStorage.getItem('CUSTOM_TURN_SERVER');
-    if (customStr) {
-      const custom = JSON.parse(customStr);
-      if (custom && custom.url) {
-        servers.push({
-          urls: custom.url,
-          username: custom.username || '',
-          credential: custom.password || '',
-        });
-        return { iceServers: servers };
-      }
-    }
-  } catch (e) {
-    console.error('[P2P] Error reading custom TURN:', e);
-  }
-
-  // Fallback to no TURN by default unless forced, 
-  // actually let's just return STUN. The fallback flow will force Default TURN if needed.
-  return { iceServers: servers };
-};
-
 // ===================== MODULE STATE =====================
 
 const STALE_SIGNAL_THRESHOLD_MS = 30000;          // 30 seconds — signals older than this are ignored
@@ -109,9 +63,25 @@ let pendingDirectMessageMutationChain = Promise.resolve();
 
 const messageListeners = new Set();                // Listeners for incoming WebRTC messages
 const statusListeners = new Set();                 // Listeners for connection status updates
+const connectionStatusByPeer = new Map();          // friendPubKey -> last known transport status
 
-export const registerConnectionStatusListener = (listener) => statusListeners.add(listener);
-const emitConnectionStatus = (pubKey, status) => statusListeners.forEach(l => l(pubKey, status));
+export const registerConnectionStatusListener = (listener) => {
+  statusListeners.add(listener);
+  return () => statusListeners.delete(listener);
+};
+
+const emitConnectionStatus = (pubKey, status) => {
+  connectionStatusByPeer.set(pubKey, status);
+  statusListeners.forEach(l => l(pubKey, status));
+};
+
+export const getConnectionStatusForPeer = (pubKey) => {
+  const status = connectionStatusByPeer.get(pubKey);
+  if (status === 'custom_relay' || status === 'default_relay') {
+    return 'relay';
+  }
+  return status || 'connecting';
+};
 
 // ===================== HELPER FUNCTIONS =====================
 
@@ -210,6 +180,7 @@ const analyzeConnectionStats = async (friendPubKey, peerConnection, forceDefault
   try {
     const stats = await peerConnection.getStats();
     let isRelay = false;
+    let relayUrl = null;
     
     const getReport = (id) => {
       if (typeof stats.get === 'function') return stats.get(id);
@@ -222,6 +193,8 @@ const analyzeConnectionStats = async (friendPubKey, peerConnection, forceDefault
         const localCandidate = getReport(report.localCandidateId);
         if (localCandidate && localCandidate.candidateType === 'relay') {
           isRelay = true;
+          // Extract relay URL from candidate
+          relayUrl = localCandidate.url || localCandidate.address;
         }
       }
     });
@@ -232,12 +205,27 @@ const analyzeConnectionStats = async (friendPubKey, peerConnection, forceDefault
       } else {
         emitConnectionStatus(friendPubKey, 'custom_relay');
       }
+      
+      // Record relay stats - try to identify which relay was used
+      if (relayUrl) {
+        try {
+          const { getCustomRelays } = await import('./iceServers');
+          const customRelays = await getCustomRelays();
+          const matchedRelay = customRelays.find(r => 
+            r.enabled !== false && r.urls.some(u => relayUrl.includes(u.replace('turn:', '').replace('turns:', '').split(':')[0]))
+          );
+          if (matchedRelay) {
+            await recordRelayAttempt(matchedRelay.id, true);
+          }
+        } catch (e) {
+          console.warn('[P2P] Could not record relay stats:', e.message);
+        }
+      }
     } else {
       emitConnectionStatus(friendPubKey, 'p2p');
     }
   } catch (e) {
     console.warn(`[P2P] Qalad analyzeConnectionStats:`, e.message);
-    // WebRTC is connected, but stats parsing failed. Default to p2p.
     emitConnectionStatus(friendPubKey, 'p2p');
   }
 };
@@ -246,7 +234,7 @@ const analyzeConnectionStats = async (friendPubKey, peerConnection, forceDefault
  * Waxay la socdaa xaaladda xiriirka ICE. Haddii uu guuldareysato, dib ayay u isku daydaa.
  */
 const monitorConnectionState = (friendPubKey, peerConnection, forceDefaultTurn) => {
-  peerConnection.oniceconnectionstatechange = () => {
+  peerConnection.oniceconnectionstatechange = async () => {
     const state = peerConnection.iceConnectionState;
     console.log(`[P2P] ICE xaalad (${friendPubKey.substring(0, 12)}...): ${state}`);
 
@@ -257,33 +245,35 @@ const monitorConnectionState = (friendPubKey, peerConnection, forceDefaultTurn) 
     }
 
     if (state === 'failed') {
-      console.warn(`[P2P] ⚠️ ICE wuu guuldareystay. Bilaabayaa Relay Fallback...`);
+      console.warn(`[P2P] ⚠️ ICE wuu guuldareystay. Bilaabayaa automatic fallback...`);
       disconnectPeer(friendPubKey);
       emitConnectionStatus(friendPubKey, 'failed');
 
-      // Check if we already tried custom TURN. We will ask user to fallback.
-      AsyncStorage.getItem('CUSTOM_TURN_SERVER').then(customStr => {
-        if (customStr && JSON.parse(customStr).url) {
-          Alert.alert(
-            'Xiriirka Wuu Fashilmay',
-            'Relay server-kaada wuu shaqeyn la yahay marka ma ogoshahay in app-ku uu isticmaalo default relay-ga?',
-            [
-              { text: 'Maya', style: 'cancel' },
-              { 
-                text: 'Haa, Isticmaal', 
-                onPress: () => {
-                  connectToPeer(friendPubKey, true, true).catch(() => {});
-                }
-              }
-            ]
-          );
-        } else {
-          // No custom turn, just silently try default relay
+      // Record relay failure stats
+      try {
+        const { getCustomRelays, recordRelayAttempt } = await import('./iceServers');
+        const customRelays = await getCustomRelays();
+        for (const relay of customRelays) {
+          if (relay.enabled !== false) {
+            await recordRelayAttempt(relay.id, false);
+          }
+        }
+      } catch (e) {
+        console.warn('[P2P] Could not record relay failure stats:', e.message);
+      }
+
+      // Automatic fallback - no user prompt needed since we now have multiple TURN providers
+      // The new getIceServers() includes multiple TURN providers for redundancy
+      setTimeout(() => {
+        console.log(`[P2P] 🔄 Automatic retry with full ICE server list (multiple TURN providers)...`);
+        connectToPeer(friendPubKey, true, true).catch((err) => {
+          console.error(`[P2P] Automatic retry failed:`, err);
+          // Final fallback - try again after longer delay
           setTimeout(() => {
             connectToPeer(friendPubKey, true, true).catch(() => {});
-          }, 2000);
-        }
-      });
+          }, 5000);
+        });
+      }, 2000);
     }
 
     if (state === 'disconnected') {
@@ -378,7 +368,7 @@ export const disconnectPeer = (friendPubKey) => {
 /**
  * Waxay abuurtaa xiriir cusub oo P2P ah oo u dirtaa offer saaxiibka.
  */
-export const connectToPeer = async (friendPubKey, isInitiator = true, forceDefaultTurn = false) => {
+export const connectToPeer = async (friendPubKey, isInitiator = true, forceDefaultTurn = true) => {
   if (!friendPubKey) return;
 
   const myPubKey = await readMyPublicKey();
@@ -456,8 +446,27 @@ const handleReceivedOffer = async (friendPubKey, offerSdp, myPubKey) => {
 
   let connection = activeConnections.get(friendPubKey);
   if (!connection) {
-    // Create a new connection to accept this offer
-    await connectToPeer(friendPubKey);
+    // Create a connection as the answerer — no local offer, just accept theirs
+    const config = await getIceServers(true);
+    const peerConnection = new P2PConnection(config);
+    monitorConnectionState(friendPubKey, peerConnection);
+
+    peerConnection.ondatachannel = (event) => {
+      setupDataChannel(friendPubKey, event.channel);
+      const conn = activeConnections.get(friendPubKey) || {};
+      activeConnections.set(friendPubKey, { ...conn, dataChannel: event.channel });
+    };
+    peerConnection.onicecandidate = (event) => {
+      if (event.candidate) {
+        publishSignal(friendPubKey, {
+          signalType: 'ice-candidate',
+          candidate: event.candidate.toJSON ? event.candidate.toJSON() : event.candidate,
+          from: myPubKey,
+        });
+      }
+    };
+
+    activeConnections.set(friendPubKey, { peerConnection, dataChannel: null });
     connection = activeConnections.get(friendPubKey);
   }
   if (!connection) return;
@@ -468,7 +477,13 @@ const handleReceivedOffer = async (friendPubKey, offerSdp, myPubKey) => {
   if (pc.signalingState === 'have-local-offer') {
     const iAmTheOfferer = myPubKey < friendPubKey;
     if (iAmTheOfferer) {
-      console.log(`[P2P] Glare detected — I am the offerer, ignoring their offer.`);
+      // My offer might have been lost — re-send it to guarantee the loser can accept it
+      console.log(`[P2P] Glare detected — I am the offerer, re-sending my offer.`);
+      await publishSignal(friendPubKey, {
+        signalType: 'offer',
+        sdp: pc.localDescription.sdp,
+        from: myPubKey,
+      });
       return;
     }
     // I should be the answerer — rollback my offer

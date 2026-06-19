@@ -1,7 +1,8 @@
 import React, { useState, useRef, useEffect } from 'react';
 import {
   View, Text, TextInput, TouchableOpacity, FlatList,
-  StyleSheet, Platform, SafeAreaView, StatusBar, KeyboardAvoidingView, Alert
+  StyleSheet, Platform, SafeAreaView, StatusBar, KeyboardAvoidingView, Alert,
+  ActivityIndicator, Modal
 } from 'react-native';
 import * as DocumentPicker from 'expo-document-picker';
 import * as FileSystem from 'expo-file-system/legacy';
@@ -15,8 +16,8 @@ import { MessageBubble } from '../../src/components/MessageBubble';
 import { StatusChip } from '../../src/components/StatusChip';
 import { VoiceNotePreview } from '../../src/components/VoiceNotePreview';
 
-import { gun, getStoredContacts, getCleanPublicKey } from '../../src/services/storage';
-import { connectToPeer, registerConnectionStatusListener } from '../../src/services/connection';
+import { gun, getStoredContacts, getCleanPublicKey, getStoredMessages, saveMessageList } from '../../src/services/storage';
+import { connectToPeer, getConnectionStatusForPeer, registerConnectionStatusListener } from '../../src/services/connection';
 import { sendMessage as sendMessageService, sendVoiceNote, listenToMessages, sendFileMessage, deleteMessage } from '../../src/services/messages';
 import { startRecording, stopRecording, readAudioAsBase64, playVoiceNote, stopSound, getVoicePlaybackUri } from '../../src/services/voiceNotes';
 import { cleanupExpired, getVoiceAudio, getVoiceMimeType, getAutoDeleteAt, setAutoDeleteAt, hasVoiceAudio } from '../../src/services/voiceStorage';
@@ -51,13 +52,26 @@ export default function FariinScreen() {
 
   const [chatData, setChatData] = useState({ name: 'Unknown', status: 'maqane' as const });
   const [messages, setMessages] = useState<Message[]>([]);
+  const PAGE_SIZE = 10;
+  const allMessagesRef = useRef<Message[]>([]);
+  const allRawRef = useRef<any[]>([]);
+  const totalDisplayedRef = useRef(PAGE_SIZE);
+  const lastListLengthRef = useRef(0);
+  const isAtBottomRef = useRef(true);
+  const isPaginatingRef = useRef(false);
+  const [displayedMessages, setDisplayedMessages] = useState<Message[]>([]);
+  const [hasMore, setHasMore] = useState(false);
+  const [isLoadingMore, setIsLoadingMore] = useState(false);
   const [connectionStatus, setConnectionStatus] = useState<string>('connecting');
+  const [showMenu, setShowMenu] = useState(false);
+  const [isSearching, setIsSearching] = useState(false);
+  const [searchQuery, setSearchQuery] = useState('');
 
   useEffect(() => {
-    if (messages && messages.length > 0) {
-      setTimeout(() => flatListRef.current?.scrollToEnd({ animated: true }), 100);
+    if (displayedMessages.length > 0 && isAtBottomRef.current && !isPaginatingRef.current) {
+      setTimeout(() => flatListRef.current?.scrollToIndex({ index: 0, animated: true }), 100);
     }
-  }, [messages]);
+  }, [displayedMessages]);
 
   // Recording state
   const [isRecording, setIsRecording] = useState(false);
@@ -78,7 +92,13 @@ export default function FariinScreen() {
     if (isWeb) {
       const expired = cleanupExpired();
       if (expired.length > 0) {
-        setMessages(prev => prev.map(m => {
+        allMessagesRef.current = allMessagesRef.current.map(m => {
+          if (m.voiceNote?.msgId && expired.includes(m.voiceNote.msgId)) {
+            return { ...m, voiceNote: { ...m.voiceNote, isExpired: true } };
+          }
+          return m;
+        });
+        setDisplayedMessages(prev => prev.map(m => {
           if (m.voiceNote?.msgId && expired.includes(m.voiceNote.msgId)) {
             return { ...m, voiceNote: { ...m.voiceNote, isExpired: true } };
           }
@@ -124,7 +144,9 @@ export default function FariinScreen() {
       }
     });
 
-    registerConnectionStatusListener((pubKey, status) => {
+    setConnectionStatus(getConnectionStatusForPeer(id));
+
+    const unsubscribeConnectionStatus = registerConnectionStatusListener((pubKey, status) => {
       if (pubKey === id) {
         setConnectionStatus(status);
       }
@@ -132,56 +154,129 @@ export default function FariinScreen() {
 
     let cancelled = false;
     const cleanupPromise = listenToMessages(id, (list) => {
-      if (cancelled) return;
-      const formatted: Message[] = list.map(m => {
-        const isVoice = m.type === 'voice';
-        
-        let isExpired = m.isExpired || false;
-        if (isVoice && isWeb && m.voiceNoteMsgId) {
-          if (!hasVoiceAudio(m.voiceNoteMsgId)) {
-            isExpired = true;
-          }
-        }
-
-        const voiceNote = isVoice
-          ? {
-              duration: m.voiceNoteDuration || '0:00',
-              audioUri: m.voiceNoteAudioUri,
-              msgId: m.voiceNoteMsgId,
-              isExpired,
-            }
-          : undefined;
-
-        const file = m.type === 'file'
-          ? {
-              msgId: m.id,
-              name: m.fileName,
-              uri: m.fileUri,
-              size: m.fileSize,
-              mimeType: m.fileMimeType,
-              isExpired: isWeb && !m.fileUri && !hasVoiceAudio(m.id)
-            }
-          : undefined;
-
-        return {
-          id: m.id,
-          text: m.content,
-          time: new Date(m.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-          type: m.senderId === id ? ('received' as const) : ('sent' as const),
-          status: m.status || 'pending',
-          isDeleted: m.isDeleted || false,
-          voiceNote,
-          file,
-        };
-      });
-      setMessages(formatted);
+      if (cancelled || list.length === lastListLengthRef.current) return;
+      lastListLengthRef.current = list.length;
+      allRawRef.current = list;
+      showSlice(list, totalDisplayedRef.current);
     });
 
     return () => {
       cancelled = true;
+      unsubscribeConnectionStatus();
       cleanupPromise.then((fn) => { if (fn) fn(); });
     };
   }, [id]);
+
+  const isSameDay = (a: Date, b: Date): boolean =>
+    a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth() && a.getDate() === b.getDate();
+
+  const getDateLabel = (timestamp: string): string => {
+    const msgDate = new Date(timestamp);
+    const today = new Date();
+    const yesterday = new Date(today);
+    yesterday.setDate(yesterday.getDate() - 1);
+
+    if (isSameDay(msgDate, today)) return 'Maanta';
+    if (isSameDay(msgDate, yesterday)) return 'Shalay';
+
+    const sixDaysAgo = new Date(today);
+    sixDaysAgo.setDate(sixDaysAgo.getDate() - 6);
+
+    if (msgDate >= sixDaysAgo) {
+      const days = ['Axad', 'Isniin', 'Tallaado', 'Arbaco', 'Khamiis', 'Jimce', 'Sabti'];
+      return days[msgDate.getDay()];
+    }
+
+    const day = msgDate.getDate().toString().padStart(2, '0');
+    const month = (msgDate.getMonth() + 1).toString().padStart(2, '0');
+    const year = msgDate.getFullYear();
+    return `${day}/${month}/${year}`;
+  };
+
+  const formatMessage = (m: any): Message => {
+    const isVoice = m.type === 'voice';
+    let isExpired = m.isExpired || false;
+    if (isVoice && isWeb && m.voiceNoteMsgId) {
+      if (!hasVoiceAudio(m.voiceNoteMsgId)) {
+        isExpired = true;
+      }
+    }
+    const voiceNote = isVoice
+      ? { duration: m.voiceNoteDuration || '0:00', audioUri: m.voiceNoteAudioUri, msgId: m.voiceNoteMsgId, isExpired }
+      : undefined;
+    const file = m.type === 'file'
+      ? { msgId: m.id, name: m.fileName, uri: m.fileUri, size: m.fileSize, mimeType: m.fileMimeType, isExpired: isWeb && !m.fileUri && !hasVoiceAudio(m.id) }
+      : undefined;
+    return {
+      id: m.id,
+      text: m.content,
+      time: `${getDateLabel(m.timestamp)} ${new Date(m.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`,
+      type: m.senderId === id ? ('received' as const) : ('sent' as const),
+      status: m.status || 'pending',
+      isDeleted: m.isDeleted || false,
+      voiceNote,
+      file,
+    };
+  };
+
+  const showSlice = (raw: any[], totalToShow: number) => {
+    totalDisplayedRef.current = totalToShow;
+    const total = raw.length;
+    const start = Math.max(0, total - totalToShow);
+    const toDisplay = raw.slice(start).reverse();
+    const formatted = toDisplay.map(formatMessage);
+    allMessagesRef.current = formatted;
+    setDisplayedMessages(formatted);
+    setHasMore(start > 0);
+    setMessages(formatted.slice(0, PAGE_SIZE));
+  };
+
+  const loadMoreMessages = () => {
+    if (isPaginatingRef.current || !hasMore) return;
+    isPaginatingRef.current = true;
+    setIsLoadingMore(true);
+    const raw = allRawRef.current;
+    const currentCount = totalDisplayedRef.current;
+    if (raw.length <= currentCount) {
+      setHasMore(false);
+      setIsLoadingMore(false);
+      isPaginatingRef.current = false;
+      return;
+    }
+    const newCount = Math.min(currentCount + PAGE_SIZE, raw.length);
+    showSlice(raw, newCount);
+    setIsLoadingMore(false);
+    setTimeout(() => { isPaginatingRef.current = false; }, 300);
+  };
+
+  const hasTriggeredLoadRef = useRef(false);
+
+  const handleScroll = (event: any) => {
+    const e = event.nativeEvent || event;
+    if (!e.contentOffset || !e.contentSize || !e.layoutMeasurement) return;
+    const { contentOffset, contentSize, layoutMeasurement } = e;
+    const maxOffset = Math.max(0, contentSize.height - layoutMeasurement.height);
+    if (Platform.OS === 'web') {
+      isAtBottomRef.current = contentOffset.y > maxOffset - 50;
+      const isNearTop = contentOffset.y < 100;
+      if (isNearTop && !hasTriggeredLoadRef.current && hasMore) {
+        hasTriggeredLoadRef.current = true;
+        loadMoreMessages();
+      } else if (!isNearTop) {
+        hasTriggeredLoadRef.current = false;
+      }
+    } else {
+      const distanceFromEnd = maxOffset - contentOffset.y;
+      const isNearTop = distanceFromEnd < 100;
+      isAtBottomRef.current = contentOffset.y < 50;
+      if (isNearTop && !hasTriggeredLoadRef.current && hasMore) {
+        hasTriggeredLoadRef.current = true;
+        loadMoreMessages();
+      } else if (!isNearTop) {
+        hasTriggeredLoadRef.current = false;
+      }
+    }
+  };
 
   const handlePlayVoiceNote = async (voiceNote: any) => {
     if (!voiceNote.msgId) {
@@ -374,15 +469,6 @@ export default function FariinScreen() {
     divider: { height: 1, backgroundColor: Colors.glassPanelBorder },
     messagesList: { padding: Spacing.md, gap: Spacing.sm, paddingBottom: Spacing.md },
     p2pChipRow: { alignItems: 'center', gap: Spacing.sm, marginBottom: Spacing.md },
-    dateLabelRow: { marginBottom: Spacing.xs },
-    dateLabel: {
-      ...Typography.labelMono, fontSize: 11, color: Colors.onSurfaceVariant,
-      backgroundColor: Colors.glassPanelBg,
-      paddingHorizontal: Spacing.sm, paddingVertical: 3,
-      borderRadius: Spacing.radiusFull,
-      borderWidth: 1,
-      borderColor: Colors.glassPanelBorder,
-    },
     inputBar: {
       flexDirection: 'row',
       alignItems: 'center',
@@ -460,7 +546,7 @@ export default function FariinScreen() {
 
     await sendMessageService(id, trimmed);
     setMsgText('');
-    setTimeout(() => flatListRef.current?.scrollToEnd({ animated: true }), 100);
+    setTimeout(() => flatListRef.current?.scrollToIndex({ index: 0, animated: true }), 100);
   };
 
   const handlePickFile = async () => {
@@ -494,7 +580,7 @@ export default function FariinScreen() {
         base64 = await FileSystem.readAsStringAsync(file.uri, { encoding: FileSystem.EncodingType.Base64 });
         if (id) await sendFileMessage(id, base64, file.name, file.mimeType || 'application/octet-stream', file.size || 0);
       }
-      setTimeout(() => flatListRef.current?.scrollToEnd({ animated: true }), 100);
+      setTimeout(() => flatListRef.current?.scrollToIndex({ index: 0, animated: true }), 100);
     } catch (e) {
       console.warn('File pick error:', e);
     }
@@ -524,50 +610,41 @@ export default function FariinScreen() {
     }
   };
 
-  const renderConnectionStatus = () => {
-    let iconName = 'ellipse-outline' as any;
-    let iconColor = Colors.onSurfaceVariant;
-    let label = '';
-
-    switch (connectionStatus) {
-      case 'p2p':
-        iconName = 'flash-outline';
-        iconColor = Colors.primary;
-        label = 'Xiriir Toos ah';
-        break;
-      case 'custom_relay':
-        iconName = 'shield-checkmark-outline';
-        iconColor = '#3b82f6';
-        label = 'Server-kaaga';
-        break;
-      case 'default_relay':
-        iconName = 'server-outline';
-        iconColor = '#a855f7';
-        label = 'Server-ka Guud';
-        break;
-      case 'connecting':
-        iconName = 'sync-outline';
-        iconColor = '#eab308';
-        label = 'Isku xirayaa...';
-        break;
-      case 'failed':
-        iconName = 'warning-outline';
-        iconColor = '#ef4444';
-        label = 'Wuu fashilmay';
-        break;
-      default:
-        iconName = 'help-circle-outline';
-        iconColor = Colors.onSurfaceVariant;
-        label = 'Ku Xiran';
+  const clearConversation = async () => {
+    try {
+      const myKey = await getCleanPublicKey();
+      if (!myKey || !id) return;
+      const allStored = await getStoredMessages();
+      const filtered = allStored.filter((m: any) => {
+        const isOurs = (m.senderId === myKey && m.receiverId === id);
+        const isTheirs = (m.senderId === id && m.receiverId === myKey);
+        return !(isOurs || isTheirs);
+      });
+      await saveMessageList(filtered);
+      for (const msg of allRawRef.current) {
+        if (msg.id) deleteMessage(id, msg.id);
+      }
+      lastListLengthRef.current = 0;
+      allRawRef.current = [];
+      allMessagesRef.current = [];
+      setDisplayedMessages([]);
+      setHasMore(false);
+      setIsSearching(false);
+      setSearchQuery('');
+    } catch (e) {
+      console.warn('Clear conversation error:', e);
     }
-
-    return (
-      <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}>
-        <Ionicons name={iconName} size={11} color={iconColor} />
-        <Text style={[styles.headerStatus, { color: iconColor, fontSize: 11 }]}>{label}</Text>
-      </View>
-    );
   };
+
+  const matchingMsgIds = searchQuery.trim()
+    ? new Set(
+        allMessagesRef.current
+          .filter(m => m.text?.toLowerCase().includes(searchQuery.toLowerCase()))
+          .map(m => m.id)
+      )
+    : new Set<string>();
+
+  const renderConnectionStatus = () => <StatusChip connectionStatus={connectionStatus} />;
 
   return (
     <SafeAreaView style={[styles.safe, { paddingTop: Platform.OS === 'android' ? StatusBar.currentHeight ?? 0 : 0 }]}>
@@ -607,11 +684,65 @@ export default function FariinScreen() {
             }}>
               <Ionicons name="call-outline" size={20} color={Colors.onSurface} />
             </TouchableOpacity>
-            <TouchableOpacity style={styles.headerActionBtn}><Ionicons name="ellipsis-vertical" size={20} color={Colors.onSurface} /></TouchableOpacity>
+            <TouchableOpacity style={styles.headerActionBtn} onPress={() => setShowMenu(true)}>
+              <Ionicons name="ellipsis-vertical" size={20} color={Colors.onSurface} />
+            </TouchableOpacity>
           </View>
         </View>
 
-        {messages.length <= 0 ?
+        {isSearching && (
+          <View style={{ flexDirection: 'row', alignItems: 'center', paddingHorizontal: Spacing.md, paddingVertical: Spacing.sm, borderBottomWidth: 1, borderBottomColor: Colors.glassPanelBorder }}>
+            <Ionicons name="search" size={18} color={Colors.onSurfaceVariant} style={{ marginRight: 8 }} />
+            <TextInput
+              style={{ flex: 1, ...Typography.bodyMd, color: Colors.onSurface }}
+              placeholder="Raadi fariin..."
+              placeholderTextColor={Colors.onSurfaceVariant}
+              value={searchQuery}
+              onChangeText={setSearchQuery}
+              autoFocus
+            />
+            {searchQuery.length > 0 && (
+              <Text style={{ color: Colors.onSurfaceVariant, fontSize: 11, marginRight: 6 }}>{matchingMsgIds.size}</Text>
+            )}
+            {searchQuery.length > 0 && (
+              <TouchableOpacity onPress={() => setSearchQuery('')}>
+                <Ionicons name="close-circle" size={18} color={Colors.onSurfaceVariant} />
+              </TouchableOpacity>
+            )}
+            <TouchableOpacity onPress={() => { setIsSearching(false); setSearchQuery(''); }} style={{ marginLeft: 8 }}>
+              <Text style={{ color: Colors.primary, fontSize: 13 }}>Joogi</Text>
+            </TouchableOpacity>
+          </View>
+        )}
+
+        {showMenu && (
+          <View style={{ position: Platform.OS === 'web' ? 'fixed' : 'absolute', top: 0, left: 0, right: 0, bottom: 0, zIndex: 100 }}>
+            <TouchableOpacity style={{ flex: 1 }} activeOpacity={1} onPress={() => setShowMenu(false)} />
+            <View style={{ position: 'absolute', top: Platform.OS === 'web' ? 90 : 100, right: 16, backgroundColor: Colors.surface, borderRadius: 12, padding: 4, minWidth: 200, borderWidth: 1, borderColor: Colors.glassPanelBorder, ...(Platform.OS === 'web' ? { boxShadow: '0 4px 12px rgba(0,0,0,0.2)' } : { elevation: 8, shadowColor: '#000', shadowOffset: { width: 0, height: 4 }, shadowOpacity: 0.2, shadowRadius: 8 }) }}>
+              <TouchableOpacity onPress={() => { setShowMenu(false); setIsSearching(true); }} style={{ flexDirection: 'row', alignItems: 'center', gap: 10, padding: 12, borderRadius: 8 }}>
+                <Ionicons name="search-outline" size={18} color={Colors.onSurface} />
+                <Text style={{ ...Typography.bodyMd, color: Colors.onSurface }}>Raadi</Text>
+              </TouchableOpacity>
+              <View style={{ height: 1, backgroundColor: Colors.glassPanelBorder, marginHorizontal: 8 }} />
+              <TouchableOpacity onPress={() => {
+                setShowMenu(false);
+                if (Platform.OS === 'web') {
+                  if (window.confirm('Ma hubtaa inaad tirtirto wada-sheekaysigan oo dhan?')) clearConversation();
+                } else {
+                  Alert.alert('Tirtir wada-sheekaysiga', 'Ma hubtaa?', [
+                    { text: 'Joogi', style: 'cancel' },
+                    { text: 'Tirtir', style: 'destructive', onPress: clearConversation }
+                  ]);
+                }
+              }} style={{ flexDirection: 'row', alignItems: 'center', gap: 10, padding: 12, borderRadius: 8 }}>
+                <Ionicons name="trash-outline" size={18} color={Colors.error} />
+                <Text style={{ ...Typography.bodyMd, color: Colors.error }}>Tirtir wada-sheekaysiga</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        )}
+
+        {allMessagesRef.current.length <= 0 ?
         (
           <View style={{ flex: 1, alignItems: 'center', justifyContent: 'center', gap: Spacing.sm }}>
             <Ionicons name="chatbubble-ellipses-outline" size={64} color={Colors.onSurfaceVariant} />
@@ -620,20 +751,38 @@ export default function FariinScreen() {
         ) : (
           <FlatList
             ref={flatListRef}
-            data={messages}
+            data={displayedMessages}
             keyExtractor={(m) => m.id}
             showsVerticalScrollIndicator={false}
             contentContainerStyle={styles.messagesList}
-            onContentSizeChange={() => flatListRef.current?.scrollToEnd({ animated: false })}
-            onLayout={() => flatListRef.current?.scrollToEnd({ animated: false })}
+            inverted={true}
+            onContentSizeChange={() => { if (!isPaginatingRef.current && isAtBottomRef.current && displayedMessages.length > 0) flatListRef.current?.scrollToIndex({ index: 0, animated: false }); }}
+            onLayout={() => { if (!isPaginatingRef.current && isAtBottomRef.current && displayedMessages.length > 0) flatListRef.current?.scrollToIndex({ index: 0, animated: false }); }}
+            onScroll={handleScroll}
+            scrollEventThrottle={100}
             ListHeaderComponent={
-            <View style={styles.p2pChipRow}>
-              <View style={styles.dateLabelRow}>
-                <Text style={styles.dateLabel}>Maanta</Text>
+              <View style={styles.p2pChipRow}>
+                <StatusChip />
               </View>
-              <StatusChip />
-            </View>
-          }
+            }
+            ListFooterComponent={
+              <View style={{ paddingTop: 4 }}>
+                {hasMore ? (
+                  <TouchableOpacity onPress={loadMoreMessages} style={{ paddingVertical: 8, alignItems: 'center' }}>
+                    {isLoadingMore ? (
+                      <ActivityIndicator size="small" color={Colors.primary} />
+                    ) : (
+                      <Text style={{ color: Colors.onSurfaceVariant, fontSize: 12 }}>Sii soco...</Text>
+                    )}
+                  </TouchableOpacity>
+                ) : displayedMessages.length > 0 ? (
+                  <View style={{ paddingVertical: 12, alignItems: 'center' }}>
+                    <Ionicons name="checkmark-done" size={16} color={Colors.onSurfaceVariant} />
+                    <Text style={{ color: Colors.onSurfaceVariant, fontSize: 11, marginTop: 2 }}>Bilowgii wada-sheekaysiga</Text>
+                  </View>
+                ) : null}
+              </View>
+            }
           renderItem={({ item }) => (
             <MessageBubble
               text={item.text}
@@ -647,6 +796,8 @@ export default function FariinScreen() {
               onPlayVoiceNote={handlePlayVoiceNote}
               onDownloadVoiceNote={isWeb ? handleDownloadVoiceNote : undefined}
               onLongPress={() => handleLongPressMessage(item.id)}
+              highlight={searchQuery}
+              isSearchMatch={matchingMsgIds.has(item.id)}
             />
           )}
         />)}

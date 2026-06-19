@@ -183,14 +183,28 @@ export const publishSignal = async (targetPublicKey, signalData) => {
   });
 
   let publishedCount = 0;
-  connectedClients.forEach((client) => {
-    try {
-      client.publish(topic, payload, { qos: 1 });
-      publishedCount++;
-    } catch (e) {
-      console.warn(`[Signaling] Dir wayday ${client._brokerName}:`, e.message);
-    }
+  
+  // Create an array of promises for all publish operations
+  const publishPromises = connectedClients.map((client) => {
+    return new Promise((resolve) => {
+      try {
+        client.publish(topic, payload, { qos: 1 }, (error) => {
+          if (error) {
+            console.warn(`[Signaling] Error publishing on ${client._brokerName}:`, error.message);
+          } else {
+            publishedCount++;
+          }
+          resolve(); // Always resolve so Promise.all doesn't reject entirely
+        });
+      } catch (e) {
+        console.warn(`[Signaling] Dir wayday ${client._brokerName}:`, e.message);
+        resolve();
+      }
+    });
   });
+
+  // Wait for all broker publish operations to complete or fail
+  await Promise.all(publishPromises);
 
   if (publishedCount > 0) {
     console.log(`[Signaling] 📤 Calaamad loo diray ${publishedCount} broker(s)`);

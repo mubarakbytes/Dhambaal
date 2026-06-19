@@ -4,14 +4,50 @@ import { Ionicons } from '@expo/vector-icons';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { Colors } from '../../src/theme/colors';
 import { Typography } from '../../src/theme/typography';
-import { initiateCall, endCall, setCallCallbacks } from '../../src/services/callService';
+import { StatusChip } from '../../src/components/StatusChip';
+import {
+  initiateCall,
+  endCall,
+  setCallCallbacks,
+  getCallConnectionStatusForPeer,
+  registerCallConnectionStatusListener,
+} from '../../src/services/callService';
+import { playOutgoingRingtone, stopRingtone } from '../../src/services/ringtone';
 
 export default function OutgoingCall() {
   const { id, name } = useLocalSearchParams<{ id: string; name: string }>();
   const router = useRouter();
   const [status, setStatus] = useState('Wicitaan Baxaya...');
+  const [answered, setAnswered] = useState(false);
+  const [connectionStatus, setConnectionStatus] = useState('connecting');
 
   useEffect(() => {
+    if (!id) {
+      return;
+    }
+
+    setConnectionStatus(getCallConnectionStatusForPeer(id));
+
+    const unsubscribeConnectionStatus = registerCallConnectionStatusListener((peerKey, nextStatus) => {
+      if (peerKey === id) {
+        setConnectionStatus(nextStatus);
+      }
+    });
+
+    if (answered) {
+      // Yield JS thread before navigating to avoid Expo Router silent drops
+      setTimeout(() => {
+        router.push(`/otherPages/OngoingCall?id=${id}&name=${encodeURIComponent(name || 'Unknown')}`);
+      }, 50);
+    }
+    return () => {
+      unsubscribeConnectionStatus();
+    };
+  }, [answered, id, name]);
+
+  useEffect(() => {
+    stopRingtone();
+    playOutgoingRingtone();
     if (!id) {
       router.back();
       return;
@@ -19,13 +55,11 @@ export default function OutgoingCall() {
 
     setCallCallbacks(
       (stream) => {
-        // When remote stream is received, it means they answered!
-        setStatus('Waa la qabtay!');
-        // Navigate to OngoingCall, passing id and name
-        router.replace(`/otherPages/OngoingCall?id=${encodeURIComponent(id)}&name=${encodeURIComponent(name || 'Unknown')}`);
+        // Stream updated
       },
       () => {
         // Call ended or rejected
+        stopRingtone();
         setStatus('Wuu go\'ay / Waa la diiday');
         setTimeout(() => {
           if (router.canGoBack()) {
@@ -34,6 +68,12 @@ export default function OutgoingCall() {
             router.replace('/(tabs)/wicitaano');
           }
         }, 1500);
+      },
+      () => {
+        // Call answered! Set state to trigger navigation effect
+        stopRingtone();
+        setStatus('Waa la qabtay!');
+        setAnswered(true);
       }
     );
 
@@ -41,12 +81,13 @@ export default function OutgoingCall() {
     initiateCall(id);
 
     return () => {
-      // If component unmounts unexpectedly, don't end call if they answered, 
-      // but usually the callback routes to OngoingCall which keeps the service alive.
+      // If component unmounts unexpectedly, stop the ringtone
+      stopRingtone();
     };
   }, [id]);
 
   const handleHangUp = () => {
+    stopRingtone();
     endCall();
     if (router.canGoBack()) {
       router.back();
@@ -63,6 +104,9 @@ export default function OutgoingCall() {
         </View>
         <Text style={styles.name}>{name || 'Unknown'}</Text>
         <Text style={styles.status}>{status}</Text>
+        <View style={styles.connectionBadgeRow}>
+          <StatusChip connectionStatus={connectionStatus} />
+        </View>
       </View>
 
       <View style={styles.controls}>
@@ -103,11 +147,18 @@ const styles = StyleSheet.create({
     color: '#fff',
     fontFamily: Typography.bold,
     marginBottom: 8,
+    textAlign: 'center',
+    width: '100%',
   },
   status: {
     fontSize: 16,
     color: 'rgba(255,255,255,0.7)',
     fontFamily: Typography.regular,
+    textAlign: 'center',
+    width: '100%',
+  },
+  connectionBadgeRow: {
+    marginTop: 12,
   },
   controls: {
     paddingBottom: Platform.OS === 'ios' ? 40 : 24,

@@ -136,7 +136,7 @@ export default function WicitaaanoScreen() {
         renderSectionHeader={({ section: { title } }) => (
           <Text style={styles.sectionHeader}>{title}</Text>
         )}
-        renderItem={({ item }) => <Pressable onPress={() => isWeb ? router.push({ pathname: '/(tabs)/fariimaha', params: { chatId: item.id } }) : router.push(`/fariin/${item.id}`)}><CallItem call={item} /></Pressable>}
+        renderItem={({ item }) => <Pressable onPress={() => isWeb ? router.push({ pathname: '/(tabs)/fariimaha', params: { chatId: item.contactId } }) : router.push(`/fariin/${item.contactId}`)}><CallItem call={item} /></Pressable>}
         ListEmptyComponent={
           <View style={styles.empty}>
             <Ionicons name="call-outline" size={48} color={Colors.onSurfaceVariant} style={styles.emptyIcon} />

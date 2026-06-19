@@ -1,7 +1,8 @@
 import React, { useState, useEffect } from 'react';
 import {
   View, Text, TouchableOpacity, StyleSheet, Platform,
-  SafeAreaView, StatusBar, ScrollView, Share, Alert, Clipboard, TextInput
+  SafeAreaView, StatusBar, ScrollView, Share, Alert, Clipboard, TextInput,
+  Modal, Switch, FlatList, ActivityIndicator
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import QRCodeSVG from 'react-native-qrcode-svg';
@@ -16,6 +17,7 @@ import { WebSidebarLayout } from '../../src/components/WebSidebarLayout';
 import { MadaxaMobilka } from '../../src/components/MadaxaMobilka';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { router } from 'expo-router';
+import { getCustomRelays, saveCustomRelays, getRelayStats, recordRelayAttempt, resetRelayStats } from '../../src/services/iceServers';
 
 const SETTINGS = [
   { icon: 'notifications-outline' as const, label: 'Ogeysiisyada', sub: 'Maamul codadka iyo fariimaha' },
@@ -122,10 +124,25 @@ export default function AnigaScreen() {
   const [vibrateEnabled, setVibrateEnabled] = useState(true);
   const [themeMode, setThemeMode] = useState<'dark' | 'light'>('dark');
 
-  // Custom Relay States
-  const [customRelayUrl, setCustomRelayUrl] = useState('');
-  const [customRelayUser, setCustomRelayUser] = useState('');
-  const [customRelayPass, setCustomRelayPass] = useState('');
+  // Custom Relay States - Dashboard
+  const [customRelays, setCustomRelays] = useState<Array<{
+    id: string;
+    name: string;
+    urls: string[];
+    username: string;
+    password: string;
+    enabled: boolean;
+  }>>([]);
+  const [relayStats, setRelayStats] = useState<Record<string, { success: number; failed: number; lastUsed: string | null }>>({});
+  const [showAddRelayModal, setShowAddRelayModal] = useState(false);
+  const [editingRelayId, setEditingRelayId] = useState<string | null>(null);
+  const [newRelayForm, setNewRelayForm] = useState({
+    name: '',
+    urls: [''],
+    username: '',
+    password: '',
+    enabled: true,
+  });
 
   useEffect(() => {
     const loadProfileAndSettings = async () => {
@@ -138,19 +155,39 @@ export default function AnigaScreen() {
         const storedSound = await AsyncStorage.getItem('SETTINGS_SOUND');
         const storedVibrate = await AsyncStorage.getItem('SETTINGS_VIBRATE');
         const storedTheme = await AsyncStorage.getItem('SETTINGS_THEME');
-        const storedRelay = await AsyncStorage.getItem('CUSTOM_TURN_SERVER');
+        const [savedRelays, savedStats] = await Promise.all([
+          getCustomRelays(),
+          getRelayStats(),
+        ]);
 
         if (storedSound !== null) setSoundEnabled(storedSound === 'true');
         if (storedVibrate !== null) setVibrateEnabled(storedVibrate === 'true');
         if (storedTheme !== null) setThemeMode(storedTheme as 'dark' | 'light');
-        if (storedRelay !== null) {
-          try {
-            const relay = JSON.parse(storedRelay);
-            setCustomRelayUrl(relay.url || '');
-            setCustomRelayUser(relay.username || '');
-            setCustomRelayPass(relay.password || '');
-          } catch(e) {}
+        
+        // Migrate old single relay format to new array format
+        if (savedRelays.length === 0) {
+          const oldRelay = await AsyncStorage.getItem('CUSTOM_TURN_SERVER');
+          if (oldRelay) {
+            try {
+              const relay = JSON.parse(oldRelay);
+              if (relay.url) {
+                const migratedRelay = {
+                  id: `relay_${Date.now()}`,
+                  name: 'My Relay',
+                  urls: [relay.url],
+                  username: relay.username || '',
+                  password: relay.password || '',
+                  enabled: true,
+                };
+                await saveCustomRelays([migratedRelay]);
+                setCustomRelays([migratedRelay]);
+              }
+            } catch(e) {}
+          }
+        } else {
+          setCustomRelays(savedRelays);
         }
+        setRelayStats(savedStats);
       } catch (err) {
         console.error('Error loading settings:', err);
       }
@@ -172,6 +209,62 @@ export default function AnigaScreen() {
     setTheme(val);
     setThemeMode(val);
     await AsyncStorage.setItem('SETTINGS_THEME', val);
+  };
+
+  // Relay form handlers
+  const handleAddUrl = () => {
+    setNewRelayForm(prev => ({ ...prev, urls: [...prev.urls, ''] }));
+  };
+
+  const handleRemoveUrl = (index: number) => {
+    if (newRelayForm.urls.length <= 1) return;
+    setNewRelayForm(prev => ({ ...prev, urls: prev.urls.filter((_, i) => i !== index) }));
+  };
+
+  const handleUrlChange = (index: number, text: string) => {
+    setNewRelayForm(prev => {
+      const urls = [...prev.urls];
+      urls[index] = text;
+      return { ...prev, urls };
+    });
+  };
+
+  const saveRelay = async () => {
+    if (!newRelayForm.name.trim()) {
+      Alert.alert('Error', 'Please enter a relay name');
+      return;
+    }
+    const validUrls = newRelayForm.urls.filter(u => u.trim());
+    if (validUrls.length === 0) {
+      Alert.alert('Error', 'Please enter at least one relay URL');
+      return;
+    }
+
+    const relayData = {
+      ...newRelayForm,
+      name: newRelayForm.name.trim(),
+      urls: validUrls,
+    };
+
+    if (editingRelayId) {
+      // Update existing
+      const updated = customRelays.map(r => r.id === editingRelayId ? { ...r, ...relayData } : r);
+      setCustomRelays(updated);
+      await saveCustomRelays(updated);
+    } else {
+      // Add new
+      const newRelay = {
+        ...relayData,
+        id: `relay_${Date.now()}`,
+      };
+      const updated = [...customRelays, newRelay];
+      setCustomRelays(updated);
+      await saveCustomRelays(updated);
+    }
+
+    setShowAddRelayModal(false);
+    setEditingRelayId(null);
+    setNewRelayForm({ name: '', urls: [''], username: '', password: '', enabled: true });
   };
 
   const isWeb = Platform.OS === 'web';
@@ -429,6 +522,136 @@ export default function AnigaScreen() {
       ...Typography.titleMd,
       color: Colors.onPrimary,
     },
+    // Relay Dashboard Styles
+    statsContainer: {
+      flexDirection: 'row',
+      flexWrap: 'wrap',
+      gap: Spacing.sm,
+      marginBottom: Spacing.md,
+    },
+    statCard: {
+      flex: 1,
+      minWidth: '45%',
+      backgroundColor: Colors.glassPanelBg,
+      borderWidth: 1,
+      borderColor: Colors.glassPanelBorder,
+      borderRadius: Spacing.radiusMd,
+      padding: Spacing.md,
+      alignItems: 'center',
+    },
+    statNumber: {
+      ...Typography.headlineLg,
+      color: Colors.primary,
+      fontSize: 24,
+      fontWeight: 'bold',
+    },
+    statLabel: {
+      ...Typography.bodySm,
+      color: Colors.onSurfaceVariant,
+      marginTop: 2,
+      textAlign: 'center',
+    },
+    addRelayButton: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'center',
+      gap: Spacing.xs,
+      padding: Spacing.md,
+      backgroundColor: Colors.glassInteractiveBg,
+      borderWidth: 1,
+      borderColor: Colors.primary,
+      borderRadius: Spacing.radiusMd,
+      marginBottom: Spacing.md,
+    },
+    addRelayButtonText: {
+      ...Typography.titleMd,
+      color: Colors.primary,
+    },
+    emptyState: {
+      alignItems: 'center',
+      padding: Spacing.xl,
+      gap: Spacing.sm,
+    },
+    emptyStateText: {
+      ...Typography.titleMd,
+      color: Colors.onSurface,
+    },
+    emptyStateSub: {
+      ...Typography.bodySm,
+      color: Colors.onSurfaceVariant,
+      textAlign: 'center',
+    },
+    relayCard: {
+      backgroundColor: Colors.glassPanelBg,
+      borderWidth: 1,
+      borderColor: Colors.glassPanelBorder,
+      borderRadius: Spacing.radiusMd,
+      padding: Spacing.md,
+      marginBottom: Spacing.sm,
+    },
+    relayHeader: {
+      flexDirection: 'row',
+      justifyContent: 'space-between',
+      alignItems: 'flex-start',
+      gap: Spacing.md,
+    },
+    relayInfo: {
+      flex: 1,
+    },
+    relayNameRow: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: Spacing.sm,
+      marginBottom: Spacing.xs,
+    },
+    relayName: {
+      ...Typography.titleMd,
+      color: Colors.onSurface,
+      flex: 1,
+    },
+    statusBadge: {
+      paddingHorizontal: Spacing.sm,
+      paddingVertical: 2,
+      borderRadius: Spacing.radiusSm,
+    },
+    statusBadgeActive: {
+      backgroundColor: 'rgba(76, 175, 80, 0.2)',
+    },
+    statusBadgeInactive: {
+      backgroundColor: 'rgba(255, 107, 107, 0.2)',
+    },
+    statusBadgeText: {
+      ...Typography.bodySm,
+      fontSize: 10,
+      fontWeight: '600',
+    },
+    relayUrls: {
+      marginBottom: Spacing.sm,
+    },
+    relayUrlText: {
+      ...Typography.labelMono,
+      color: Colors.onSurfaceVariant,
+      fontSize: 11,
+      marginBottom: 2,
+    },
+    relayStats: {
+      flexDirection: 'row',
+      flexWrap: 'wrap',
+      gap: Spacing.md,
+    },
+    relayStatItem: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 4,
+    },
+    relayActions: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: Spacing.xs,
+    },
+    actionButton: {
+      padding: Spacing.xs,
+    },
   });
 
   const profileCard = (
@@ -583,7 +806,162 @@ export default function AnigaScreen() {
     </ScrollView>
   );
 
-  // Reusable custom slide-up settings modal sheet
+  // ==================== RELAY DASHBOARD COMPONENT ====================
+const RelayDashboard = ({
+  relays,
+  stats,
+  onAddRelay,
+  onEditRelay,
+  onDeleteRelay,
+  onToggleEnabled,
+  onResetStats,
+}: {
+  relays: Array<{ id: string; name: string; urls: string[]; username: string; password: string; enabled: boolean }>;
+  stats: Record<string, { success: number; failed: number; lastUsed: string | null }>;
+  onAddRelay: () => void;
+  onEditRelay: (relay: { id: string; name: string; urls: string[]; username: string; password: string; enabled: boolean }) => void;
+  onDeleteRelay: (relayId: string) => void;
+  onToggleEnabled: (relayId: string, enabled: boolean) => void;
+  onResetStats: (relayId: string) => void;
+}) => {
+  const totalSuccess = Object.values(stats).reduce((sum, s) => sum + s.success, 0);
+  const totalFailed = Object.values(stats).reduce((sum, s) => sum + s.failed, 0);
+  const totalAttempts = totalSuccess + totalFailed;
+  const successRate = totalAttempts > 0 ? Math.round((totalSuccess / totalAttempts) * 100) : 0;
+
+  return (
+    <View style={styles.modalOptionGroup}>
+      {/* Summary Stats */}
+      <View style={styles.statsContainer}>
+        <View style={styles.statCard}>
+          <Text style={styles.statNumber}>{relays.length}</Text>
+          <Text style={styles.statLabel}>Relays Configured</Text>
+        </View>
+        <View style={styles.statCard}>
+          <Text style={styles.statNumber}>{totalAttempts}</Text>
+          <Text style={styles.statLabel}>Total Attempts</Text>
+        </View>
+        <View style={styles.statCard}>
+          <Text style={styles.statNumber}>{successRate}%</Text>
+          <Text style={styles.statLabel}>Success Rate</Text>
+        </View>
+        <View style={styles.statCard}>
+          <Text style={styles.statNumber}>{relays.filter(r => r.enabled).length}</Text>
+          <Text style={styles.statLabel}>Active</Text>
+        </View>
+      </View>
+
+      {/* Add Relay Button */}
+      <TouchableOpacity style={styles.addRelayButton} onPress={onAddRelay} activeOpacity={0.8}>
+        <Ionicons name="add-circle-outline" size={20} color={Colors.primary} />
+        <Text style={styles.addRelayButtonText}>Add New Relay</Text>
+      </TouchableOpacity>
+
+      {/* Relays List */}
+      {relays.length === 0 ? (
+        <View style={styles.emptyState}>
+          <Ionicons name="wifi-outline" size={48} color={Colors.onSurfaceVariant} />
+          <Text style={styles.emptyStateText}>No custom relays configured</Text>
+          <Text style={styles.emptyStateSub}>Add your own TURN server for maximum privacy</Text>
+        </View>
+      ) : (
+        <FlatList
+          data={relays}
+          keyExtractor={(item) => item.id}
+          ListEmptyComponent={() => null}
+          renderItem={({ item }) => {
+            const relayStats = stats[item.id] || { success: 0, failed: 0, lastUsed: null };
+            const relayAttempts = relayStats.success + relayStats.failed;
+            const relaySuccessRate = relayAttempts > 0 ? Math.round((relayStats.success / relayAttempts) * 100) : 0;
+            
+            return (
+              <View style={styles.relayCard}>
+                <View style={styles.relayHeader}>
+                  <View style={styles.relayInfo}>
+                    <View style={styles.relayNameRow}>
+                      <Text style={styles.relayName}>{item.name}</Text>
+                      <View style={[
+                        styles.statusBadge,
+                        item.enabled ? styles.statusBadgeActive : styles.statusBadgeInactive
+                      ]}>
+                        <Text style={styles.statusBadgeText}>
+                          {item.enabled ? 'Active' : 'Inactive'}
+                        </Text>
+                      </View>
+                    </View>
+                    <View style={styles.relayUrls}>
+                      {item.urls.map((url, idx) => (
+                        <Text key={idx} style={styles.relayUrlText}>{url}</Text>
+                      ))}
+                    </View>
+                    <View style={styles.relayStats}>
+                      <Text style={styles.relayStatItem}>
+                        <Ionicons name="checkmark-circle-outline" size={14} color="#4CAF50" />
+                        <Text> Success: {relayStats.success}</Text>
+                      </Text>
+                      <Text style={styles.relayStatItem}>
+                        <Ionicons name="close-circle-outline" size={14} color="#FF6B6B" />
+                        <Text> Failed: {relayStats.failed}</Text>
+                      </Text>
+                      <Text style={styles.relayStatItem}>
+                        <Ionicons name="trending-up-outline" size={14} color={Colors.primary} />
+                        <Text> Rate: {relaySuccessRate}%</Text>
+                      </Text>
+                      {relayStats.lastUsed && (
+                        <Text style={styles.relayStatItem}>
+                          <Ionicons name="time-outline" size={14} color={Colors.onSurfaceVariant} />
+                          <Text> Last: {new Date(relayStats.lastUsed).toLocaleDateString()}</Text>
+                        </Text>
+                      )}
+                    </View>
+                  </View>
+                  
+                  <View style={styles.relayActions}>
+                    <TouchableOpacity 
+                      onPress={() => onToggleEnabled(item.id, !item.enabled)}
+                      style={styles.actionButton}
+                      activeOpacity={0.7}
+                    >
+                      <Switch
+                        value={item.enabled}
+                        onValueChange={(val) => onToggleEnabled(item.id, val)}
+                        thumbColor={item.enabled ? Colors.primary : Colors.onSurfaceVariant}
+                        trackColor={{ false: Colors.glassPanelBg, true: Colors.primary }}
+                      />
+                    </TouchableOpacity>
+                    <TouchableOpacity 
+                      onPress={() => onEditRelay(item)}
+                      style={styles.actionButton}
+                      activeOpacity={0.7}
+                    >
+                      <Ionicons name="create-outline" size={20} color={Colors.onSurfaceVariant} />
+                    </TouchableOpacity>
+                    <TouchableOpacity 
+                      onPress={() => onResetStats(item.id)}
+                      style={styles.actionButton}
+                      activeOpacity={0.7}
+                    >
+                      <Ionicons name="refresh-outline" size={20} color={Colors.onSurfaceVariant} />
+                    </TouchableOpacity>
+                    <TouchableOpacity 
+                      onPress={() => onDeleteRelay(item.id)}
+                      style={styles.actionButton}
+                      activeOpacity={0.7}
+                    >
+                      <Ionicons name="trash-outline" size={20} color="#FF6B6B" />
+                    </TouchableOpacity>
+                  </View>
+                </View>
+              </View>
+            );
+          }}
+        />
+      )}
+    </View>
+  );
+};
+
+// Reusable custom slide-up settings modal sheet
   const renderSettingsModal = () => {
     if (!activeModal) return null;
 
@@ -713,55 +1091,156 @@ export default function AnigaScreen() {
             )}
 
             {activeModal === 'connection' && (
-              <View style={styles.modalOptionGroup}>
-                <Text style={styles.modalSubtitle}>Halkan waxaad ku dari kartaa Custom Relay Server (TURN) si xiriirkaagu u noqdo mid si buuxda aad adigu u maamusho.</Text>
-                
-                <Text style={styles.keyLabel}>Relay URL (tusaale: turn:server.com:3478)</Text>
-                <TextInput
-                  style={styles.inputField}
-                  placeholder="turn:my-server.com:3478"
-                  placeholderTextColor={Colors.onSurfaceVariant}
-                  value={customRelayUrl}
-                  onChangeText={setCustomRelayUrl}
-                  autoCapitalize="none"
-                />
-
-                <Text style={styles.keyLabel}>Magaca Isticmaalaha (Username)</Text>
-                <TextInput
-                  style={styles.inputField}
-                  placeholder="Username"
-                  placeholderTextColor={Colors.onSurfaceVariant}
-                  value={customRelayUser}
-                  onChangeText={setCustomRelayUser}
-                  autoCapitalize="none"
-                />
-
-                <Text style={styles.keyLabel}>Furaha Sirta (Password)</Text>
-                <TextInput
-                  style={styles.inputField}
-                  placeholder="Password"
-                  placeholderTextColor={Colors.onSurfaceVariant}
-                  secureTextEntry
-                  value={customRelayPass}
-                  onChangeText={setCustomRelayPass}
-                />
-
-                <TouchableOpacity 
-                  style={styles.saveButton}
-                  onPress={async () => {
-                    const relay = { url: customRelayUrl, username: customRelayUser, password: customRelayPass };
-                    await AsyncStorage.setItem('CUSTOM_TURN_SERVER', JSON.stringify(relay));
-                    Alert.alert('Waa la keydiyay', 'Relay server-kaada cusub waa la keydiyay.');
-                    setActiveModal(null);
-                  }}
-                >
-                  <Text style={styles.saveButtonText}>Kaydi</Text>
-                </TouchableOpacity>
-              </View>
+              <RelayDashboard
+                relays={customRelays}
+                stats={relayStats}
+                onAddRelay={() => {
+                  setNewRelayForm({ name: '', urls: [''], username: '', password: '', enabled: true });
+                  setEditingRelayId(null);
+                  setShowAddRelayModal(true);
+                }}
+                onEditRelay={(relay) => {
+                  setNewRelayForm({ 
+                    name: relay.name, 
+                    urls: relay.urls.length > 0 ? relay.urls : [''], 
+                    username: relay.username, 
+                    password: relay.password, 
+                    enabled: relay.enabled 
+                  });
+                  setEditingRelayId(relay.id);
+                  setShowAddRelayModal(true);
+                }}
+                onDeleteRelay={async (relayId) => {
+                  Alert.alert(
+                    'Tirtir Relay',
+                    'Miyad hubtaa in aad relay-kan tirtirto?',
+                    [
+                      { text: 'Maya', style: 'cancel' },
+                      { text: 'Haa, Tirtir', style: 'destructive', onPress: async () => {
+                        const updated = customRelays.filter(r => r.id !== relayId);
+                        setCustomRelays(updated);
+                        await saveCustomRelays(updated);
+                        const stats = { ...relayStats };
+                        delete stats[relayId];
+                        setRelayStats(stats);
+                        await AsyncStorage.setItem('CUSTOM_TURN_STATS', JSON.stringify(stats));
+                      }}
+                    ]
+                  );
+                }}
+                onToggleEnabled={async (relayId, enabled) => {
+                  const updated = customRelays.map(r => r.id === relayId ? { ...r, enabled } : r);
+                  setCustomRelays(updated);
+                  await saveCustomRelays(updated);
+                }}
+                onResetStats={async (relayId) => {
+                  await resetRelayStats(relayId);
+                  const stats = await getRelayStats();
+                  setRelayStats(stats);
+                }}
+              />
             )}
           </View>
         </GlassPanel>
       </View>
+    );
+  };
+
+  // Add/Edit Relay Modal
+  const renderAddEditRelayModal = () => {
+    if (!showAddRelayModal) return null;
+
+    return (
+      <Modal visible={true} animationType="slide" transparent={true}>
+        <TouchableOpacity style={styles.modalOverlay} onPress={() => { setShowAddRelayModal(false); setEditingRelayId(null); }} activeOpacity={1} />
+        <GlassPanel style={[styles.modalContent, isWeb && styles.modalContentWeb]}>
+          <View style={styles.modalHeader}>
+            <Text style={styles.modalTitle}>
+              {editingRelayId ? 'Edit Relay' : 'Add Custom Relay'}
+            </Text>
+            <TouchableOpacity onPress={() => { setShowAddRelayModal(false); setEditingRelayId(null); }} style={styles.modalCloseBtn}>
+              <Ionicons name="close" size={20} color={Colors.onSurface} />
+            </TouchableOpacity>
+          </View>
+          <ScrollView style={styles.modalBody} showsVerticalScrollIndicator={false}>
+            <Text style={styles.modalSubtitle}>
+              {editingRelayId ? 'Update your TURN server settings' : 'Configure your own TURN server for maximum privacy'}
+            </Text>
+
+            <View style={styles.modalOptionGroup}>
+              <Text style={styles.keyLabel}>Relay Name</Text>
+              <TextInput
+                style={styles.inputField}
+                placeholder="My Relay Server"
+                value={newRelayForm.name}
+                onChangeText={(text) => setNewRelayForm(prev => ({ ...prev, name: text }))}
+                autoCapitalize="words"
+              />
+
+              <Text style={styles.keyLabel}>Relay URLs (one per line)</Text>
+              {newRelayForm.urls.map((url, idx) => (
+                <View key={idx} style={{ flexDirection: 'row', gap: Spacing.xs, marginBottom: Spacing.xs }}>
+                  <TextInput
+                    style={[styles.inputField, { flex: 1 }]}
+                    placeholder={`turn:server.com:3478 (URL ${idx + 1})`}
+                    placeholderTextColor={Colors.onSurfaceVariant}
+                    value={url}
+                    onChangeText={(text) => handleUrlChange(idx, text)}
+                    autoCapitalize="none"
+                  />
+                  {newRelayForm.urls.length > 1 && (
+                    <TouchableOpacity 
+                      onPress={() => handleRemoveUrl(idx)} 
+                      style={styles.actionButton}
+                      activeOpacity={0.7}
+                    >
+                      <Ionicons name="close-circle-outline" size={24} color="#FF6B6B" />
+                    </TouchableOpacity>
+                  )}
+                </View>
+              ))}
+              <TouchableOpacity 
+                onPress={handleAddUrl} 
+                style={[styles.addRelayButton, { marginTop: Spacing.xs, backgroundColor: Colors.glassPanelBg }]}
+                activeOpacity={0.8}
+              >
+                <Ionicons name="add-outline" size={18} color={Colors.primary} />
+                <Text style={styles.addRelayButtonText}>Add Another URL</Text>
+              </TouchableOpacity>
+
+              <Text style={styles.keyLabel}>Username (optional)</Text>
+              <TextInput
+                style={styles.inputField}
+                placeholder="Username"
+                placeholderTextColor={Colors.onSurfaceVariant}
+                value={newRelayForm.username}
+                onChangeText={(text) => setNewRelayForm(prev => ({ ...prev, username: text }))}
+                autoCapitalize="none"
+              />
+
+              <Text style={styles.keyLabel}>Password (optional)</Text>
+              <TextInput
+                style={styles.inputField}
+                placeholder="Password"
+                placeholderTextColor={Colors.onSurfaceVariant}
+                secureTextEntry
+                value={newRelayForm.password}
+                onChangeText={(text) => setNewRelayForm(prev => ({ ...prev, password: text }))}
+                autoCapitalize="none"
+              />
+
+              <TouchableOpacity 
+                style={styles.saveButton}
+                onPress={saveRelay}
+              >
+                <Text style={styles.saveButtonText}>
+                  {editingRelayId ? 'Save Changes' : 'Add Relay'}
+                </Text>
+              </TouchableOpacity>
+            </View>
+          </ScrollView>
+        </GlassPanel>
+      </Modal>
     );
   };
 
@@ -777,6 +1256,8 @@ export default function AnigaScreen() {
         
         {/* Render overlay slide modal */}
         {renderSettingsModal()}
+        {/* Render Add/Edit Relay Modal */}
+        {renderAddEditRelayModal()}
       </View>
     </WebSidebarLayout>
   );

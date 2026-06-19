@@ -40,16 +40,21 @@ export default function Index() {
   const [hasCopied, setHasCopied] = useState(false);
   const [generatedKeyPair, setGeneratedKeyPair] = useState<any>(null);
 
-  // Auto-login check: haddii uu jiro furaha guud ee akoonka, toos ugu gudub bogga fariimaha
+  const [isChecking, setIsChecking] = useState(true);
+
+  // Auto-login check: haddii uu jiro furaha guud ee akoonka, UI-ga ha muujin.
+  // Layout-ka ayaa sameyn doona redirect-ga, marka halkan kaliya waxaan ka hortageynaa in UI-gu soo muuqdo.
   React.useEffect(() => {
     const checkExistingAuth = async () => {
       try {
         const storedKey = await AsyncStorage.getItem('PUBLICK_KEY');
-        if (storedKey) {
-          router.replace('/(tabs)/fariimaha');
+        if (!storedKey) {
+          setIsChecking(false);
         }
+        // Haddii storedKey jiro, isChecking waxay ahaan doontaa true si uusan UI-gu u muuqan inta redirect-gu dhacayo
       } catch (err) {
         console.error('Error checking auth status:', err);
+        setIsChecking(false);
       }
     };
     checkExistingAuth();
@@ -58,6 +63,11 @@ export default function Index() {
   const isWeb = width > 768;
 
   // Navigation handlers (UI transitions)
+
+  if (isChecking) {
+    // Show empty background while checking to prevent flash
+    return <View style={styles.container} />;
+  }
 
   /**
    * Wuxuu u wareejiyaa user-ka screen-ka magac gelinta halkaas oo uu ku bilaabi karo habka abuurista cinwaanka cusub.
