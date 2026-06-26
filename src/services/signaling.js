@@ -29,8 +29,14 @@ const MAX_PROCESSED_IDS = 500; // Keep memory bounded
 
 // ===================== HELPERS =====================
 
-const generateClientId = () => {
+const generateClientId = (myPublicKey = null, brokerName = '') => {
   const platformName = Platform.OS;
+  if (myPublicKey) {
+    // Generate a stable client ID using the public key (cleaned of non-alphanumeric chars)
+    const cleanPubKey = myPublicKey.replace(/[^a-zA-Z0-9]/g, '').substring(0, 16);
+    const cleanBroker = brokerName.replace(/[^a-zA-Z0-9]/g, '');
+    return `${APP_TOPIC_PREFIX}_${platformName}_${cleanBroker}_${cleanPubKey}`;
+  }
   const randomPart = Math.random().toString(36).substring(2, 10);
   return `${APP_TOPIC_PREFIX}_${platformName}_${randomPart}`;
 };
@@ -74,15 +80,17 @@ export const connectToSignalingBroker = (myPublicKey = null) => {
     let attempts = 0;
 
     MQTT_BROKER_LIST.forEach((broker) => {
-      const clientId = generateClientId();
-      console.log(`[Signaling] Isku xiraya ${broker.name} (${broker.url})...`);
+      const clientId = generateClientId(myPublicKey, broker.name);
+      console.log(`[Signaling] Isku xiraya ${broker.name} (${broker.url}) clientId: ${clientId}...`);
 
       const willTopic = myPublicKey ? buildPresenceTopic(myPublicKey) : undefined;
       const willPayload = myPublicKey ? JSON.stringify({ status: 'offline', publicKey: myPublicKey }) : undefined;
 
+      const isPersistent = !!myPublicKey;
+
       const client = mqtt.connect(broker.url, {
         clientId,
-        clean: true,
+        clean: !isPersistent, // clean: false enables persistent sessions on the broker
         connectTimeout: 15000,
         reconnectPeriod: 10000,
         keepalive: 30,

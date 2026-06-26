@@ -245,7 +245,7 @@ export default function Index() {
                   <Ionicons name="person-outline" size={20} color="#718096" style={styles.inputIcon} />
                   <TextInput
                     style={styles.textInput}
-                    placeholder="Tusaale: Mubaarak"
+                    placeholder="Tusaale: Safiyo"
                     placeholderTextColor="#4A5568"
                     value={displayName}
                     onChangeText={setDisplayName}

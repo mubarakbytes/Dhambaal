@@ -84,15 +84,21 @@ export const listenToContacts = (onContactsUpdate) => {
   const listener = gun.get('contacts').map();
 
   listener.on((contactNode, key) => {
-    if (contactNode && !contactNode.deleted) {
-      contactsMap[key] = contactNode;
-    } else {
-      delete contactsMap[key];
-    }
+    if (contactNode) {
+      if (contactNode.deleted) {
+        delete contactsMap[key];
+      } else {
+        // Merge the incoming GunDB node with our existing cached contact to preserve local states
+        contactsMap[key] = {
+          ...contactsMap[key],
+          ...contactNode
+        };
+      }
 
-    onContactsUpdate(
-      Object.values(contactsMap).filter((contact) => contact && !contact.deleted)
-    );
+      onContactsUpdate(
+        Object.values(contactsMap).filter((contact) => contact && !contact.deleted)
+      );
+    }
   });
 
   return () => {

@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import {
   View, Text, FlatList, TouchableOpacity, StyleSheet,
-  Platform, SafeAreaView, StatusBar, Modal, TextInput, Alert
+  Platform, SafeAreaView, StatusBar, Modal, TextInput, Alert, ScrollView
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { CameraView, useCameraPermissions } from 'expo-camera';
@@ -120,18 +120,18 @@ export default function DadkaScreen() {
   const handleSendContactRequest = async () => {
     if (!name || !publicKey) {
       {
-        isWeb ? alert('Please add the person name and public key first.') 
+        isWeb ? alert('Fadlan buuxi magaca iyo public key-ga') 
         : 
-        Alert.alert('Missing information', 'Please add the person name and public key first.');
+        Alert.alert('Xog ayaa harsan', 'Fadlan buuxi magaca iyo public key-ga');
       }
       return;
     }
 
     if (!requestMessage.trim()) {
       {
-        isWeb ? alert('Please write a short message to send with the request.') 
+        isWeb ? alert('Fadlan qor fariin gaaban oo codsi ah') 
         : 
-        Alert.alert('Write a note', 'Please write a short message to send with the request.');
+        Alert.alert('Qor fariin', 'Fadlan qor fariin gaaban oo codsi ah');
       }
       return;
     }
@@ -144,13 +144,13 @@ export default function DadkaScreen() {
       closeRequestModal();
 
       Alert.alert(
-        'Request sent',
+        'Codsiga waa la diray',
         delivered
-          ? `Your request was sent to ${name}.`
-          : `The request was queued for ${name}. It will be sent as soon as the direct connection opens.`
+          ? `Codsiga waa la diray ${name}.`
+          : `Codsiga waa la helay ${name}. Waa la diri donaa lkn hadda ma jiro xiriir direct ah.`
       );
     } catch (err: any) {
-      Alert.alert('Could not send request', err?.message || 'Unknown error');
+      Alert.alert('Lama diri karo codsiga', err?.message || 'Cilad aan la garanayn ayaa dhacday');
       console.error('Error sending contact request:', err?.message || err);
     } finally {
       setIsSendingRequest(false);
@@ -161,16 +161,16 @@ export default function DadkaScreen() {
     try {
       const { delivered } = await acceptContactRequest(requestId);
       {
-        isWeb ? alert('Contact accepted') : 
+        isWeb ? alert('Xiriirka waa la aqbalay') : 
         Alert.alert(
-          'Contact accepted',
+          'Xiriirka waa la aqbalay',
           delivered
-            ? 'The person was added to your contacts and the acceptance was sent directly.'
-            : 'The person was added to your contacts, but the acceptance is still waiting for a direct connection.'
+            ? 'Qofkan ayaa lagu daray xiriiradaada, waxaana si toos ah loogu diray aqbalaadaadda.'
+            : 'Qofkan ayaa lagu daray xiriiradaada, laakiin wali waxaa la sugayaa xiriir toos ah si loogu gudbiyo aqbalaadaada.'
         );
       }
     } catch (error: any) {
-      Alert.alert('Could not accept request', error?.message || 'Unknown error');
+      Alert.alert('Lama aqbalin', error?.message || 'Cilad aan la garanayn ayaa dhacday');
     }
   };
 
@@ -178,22 +178,22 @@ export default function DadkaScreen() {
     try {
       const { delivered } = await rejectContactRequest(requestId);
       {
-        isWeb ? alert('Request rejected') : 
+        isWeb ? alert('Codsiga waa la diiday') : 
         Alert.alert(
-          'Request rejected',
+          'Codsiga waa la diiday',
           delivered
-            ? 'The rejection was sent directly to the other person.'
-            : 'The request was rejected locally, but the rejection is still waiting for a direct connection.'
+            ? 'Diidmadaada waxaa si toos ah loogu gudbinayaa qofka codsiga soo diray.'
+            : 'Diidmadaada waxaa lala sugayaa xiriir toos ah si loogu gudbiyo qofka codsiga soo diray.'
         );
       }
     } catch (error: any) {
-      Alert.alert('Could not reject request', error?.message || 'Unknown error');
+      Alert.alert('Lama diidin', error?.message || 'Cilad aan la garanayn ayaa dhacday');
     }
   };
 
   const handleCancelRequest = (request: ContactRequest) => {
     const confirmCancel = Platform.OS === 'web' && typeof window !== 'undefined'
-      ? window.confirm(`Cancel the request you sent to ${request.receiverName || request.receiverId}?`)
+      ? window.confirm(`Jooji codsiga aad u dirtay ${request.receiverName || request.receiverId}?`)
       : true;
 
     if (!confirmCancel) {
@@ -204,20 +204,20 @@ export default function DadkaScreen() {
       try {
         const { delivered } = await cancelContactRequest(request.id);
         Alert.alert(
-          'Request cancelled',
+          'Codsiga waa la joojiyay',
           delivered
-            ? 'The pending request was removed and the cancellation was sent directly.'
-            : 'The pending request was removed locally and the cancellation will be sent when the connection is available.'
+            ? 'Codsiga waa la joojiyay oo si toos ah ayaa loo diray.'
+            : 'Codsiga waa la joojiyay, laakiin wali waxaa la sugayaa xiriir toos ah si loo diro joojinta.'
         );
       } catch (error: any) {
-        Alert.alert('Could not cancel request', error?.message || 'Unknown error');
+        Alert.alert('Lama joojin', error?.message || 'Cilad aan la garanayn ayaa dhacday');
       }
     })();
   };
 
   const handleDeleteContact = (contact: Contact) => {
     const confirmDelete = Platform.OS === 'web' && typeof window !== 'undefined'
-      ? window.confirm(`Remove ${contact.name} from your contacts and close the current connection?`)
+      ? window.confirm(`Ka tir ${contact.name}  contacts-kaada sidoo kale jooji xiriirka jira?`)
       : true;
 
     if (!confirmDelete) {
@@ -227,9 +227,9 @@ export default function DadkaScreen() {
     void (async () => {
       try {
         await removeContact(contact.id);
-        Alert.alert('Contact deleted', `${contact.name} has been removed.`);
+        Alert.alert('Shaqsigani ', `${contact.name} waa la masaxay.`);
       } catch (error: any) {
-        Alert.alert('Could not delete contact', error?.message || 'Unknown error');
+        Alert.alert('Lama tirin', error?.message || 'Unknown error');
       }
     })();
   };
@@ -643,7 +643,7 @@ export default function DadkaScreen() {
                   )}
                 </View>
               ) : (
-                <View style={styles.formWrapper}>
+                <ScrollView style={styles.formWrapper} showsVerticalScrollIndicator={false} contentContainerStyle={{ paddingBottom: 40 }}>
                   <Text style={styles.label}>Person Name</Text>
                   <TextInput
                     style={styles.input}
@@ -656,7 +656,7 @@ export default function DadkaScreen() {
                   <Text style={styles.label}>Public Key</Text>
                   <TextInput
                     style={[styles.input, styles.textArea]}
-                    placeholder="Gali halka PUBLIC KEY-ga saaxiibkaa."
+                    placeholder="Gali halkan PUBLIC KEY-ga saaxiibkaa."
                     placeholderTextColor={Colors.onSurfaceVariant}
                     value={publicKey}
                     onChangeText={setPublicKey}
@@ -685,10 +685,10 @@ export default function DadkaScreen() {
                     disabled={isSendingRequest}
                   >
                     <Text style={styles.submitButtonText}>
-                      {isSendingRequest ? 'Sending...' : 'Send Request'}
+                      {isSendingRequest ? 'Diraya...' : 'Dir Codsiga'}
                     </Text>
                   </TouchableOpacity>
-                </View>
+                </ScrollView>
               )}
             </View>
           </View>

@@ -553,7 +553,7 @@ export const startSignalingListener = async () => {
   if (!myPubKey) return;
 
   // First connect to MQTT broker
-  await connectToSignalingBroker();
+  await connectToSignalingBroker(myPubKey);
 
   console.log(`[P2P] 📡 Dhegeysanayaa calaamadaha: ${myPubKey.substring(0, 12)}...`);
 
@@ -561,8 +561,13 @@ export const startSignalingListener = async () => {
   await subscribeToSignals(myPubKey, async (signalData) => {
     if (!signalData || !signalData.from || signalData.from === myPubKey) return;
 
-    // Filter stale signals (older than 30 seconds)
-    if (signalData.timestamp && (Date.now() - signalData.timestamp) > STALE_SIGNAL_THRESHOLD_MS) {
+    const isCallSignal = [
+      'call-offer', 'call-answer', 'call-ice', 'call-reject', 'call-end'
+    ].includes(signalData.signalType);
+
+    // Filter stale signals (older than 30 seconds) for standard P2P signals.
+    // Call signals are processed even if they are old to show missed calls.
+    if (!isCallSignal && signalData.timestamp && (Date.now() - signalData.timestamp) > STALE_SIGNAL_THRESHOLD_MS) {
       console.log(`[P2P] Calaamad duugan la iska dhaafay (${signalData.signalType})`);
       return;
     }
@@ -592,7 +597,7 @@ export const startSignalingListener = async () => {
           await connectToPeer(friendPubKey, true);
         }
       } else if (signalData.signalType === 'call-offer') {
-        await handleCallOffer(friendPubKey, signalData.sdp);
+        await handleCallOffer(friendPubKey, signalData.sdp, signalData.timestamp);
       } else if (signalData.signalType === 'call-answer') {
         await handleCallAnswer(signalData.sdp);
       } else if (signalData.signalType === 'call-ice') {

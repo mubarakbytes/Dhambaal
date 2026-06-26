@@ -34,6 +34,8 @@ export const getCleanPublicKey = async () => {
   }
 };
 
+let isStartupResetDone = false;
+
 /**
  * Waxay soo celisaa magaca adeegaha ee ku kaydsan local storage.
  */
@@ -41,11 +43,36 @@ export const getStoredContacts = async () => {
   try {
     const rawData = await AsyncStorage.getItem(CONTACTS_STORAGE_KEY);
     const parsed = rawData ? JSON.parse(rawData) : [];
-    // Ensure all contact IDs are free of accidental JSON quotes
-    return parsed.map(c => ({
-      ...c,
-      id: c.id ? String(c.id).replace(/^"|"$/g, '').trim() : c.id
-    }));
+    
+    let hasChanges = false;
+    const cleaned = parsed.map(c => {
+      const cleanId = c.id ? String(c.id).replace(/^"|"$/g, '').trim() : c.id;
+      
+      let status = c.status || 'maqane';
+      // Reset status to 'maqane' only on the very first read (app startup)
+      if (!isStartupResetDone && status !== 'maqane') {
+        status = 'maqane';
+        hasChanges = true;
+      }
+      
+      return {
+        ...c,
+        id: cleanId,
+        status
+      };
+    });
+
+    if (!isStartupResetDone) {
+      isStartupResetDone = true;
+      if (hasChanges) {
+        // Write the reset statuses back to storage asynchronously
+        AsyncStorage.setItem(CONTACTS_STORAGE_KEY, JSON.stringify(cleaned)).catch(err => {
+          console.error('Error persisting reset contact statuses to storage:', err);
+        });
+      }
+    }
+
+    return cleaned;
   } catch (error) {
     console.error('Error fetching contacts from storage:', error);
     return [];

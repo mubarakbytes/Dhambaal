@@ -2,7 +2,7 @@ import { Platform, AppState } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { router } from 'expo-router';
 import { publishSignal } from './signaling';
-import { getCleanPublicKey } from './storage';
+import { getCleanPublicKey, getStoredContacts } from './storage';
 import { addCallRecord } from './calls';
 import { stopRingtone } from './ringtone';
 import { getIceServers } from './iceServers';
@@ -53,6 +53,18 @@ let onCallAnsweredCallback = null;
 // Call transport status for the active call screen
 const callConnectionStatusListeners = new Set();
 const callConnectionStatusByPeer = new Map();
+
+// Helper to resolve contact display name
+const resolveCallerName = async (friendPubKey) => {
+  try {
+    const contacts = await getStoredContacts();
+    const contact = contacts.find((item) => item.id === friendPubKey);
+    return contact?.name?.trim() || 'Unknown';
+  } catch (error) {
+    console.warn('[CallService] Could not resolve caller name:', error);
+    return 'Unknown';
+  }
+};
 
 export const registerCallConnectionStatusListener = (listener) => {
   callConnectionStatusListeners.add(listener);
@@ -301,7 +313,46 @@ export const initiateCall = async (friendPubKey) => {
 
 let activeIncomingCallNotificationId = 'incoming_call';
 
-export const handleIncomingOffer = async (friendPubKey, offerSdp) => {
+export const handleIncomingOffer = async (friendPubKey, offerSdp, timestamp = null) => {
+  // Check if this is a late/missed call signal
+  const signalTimestamp = timestamp || Date.now();
+  const signalAgeSeconds = (Date.now() - signalTimestamp) / 1000;
+
+  if (signalAgeSeconds >= 15) {
+    console.log(`[CallService] Call offer is too old (${signalAgeSeconds.toFixed(1)}s). Handling as missed call.`);
+    // 1. Record the missed call in database
+    await addCallRecord(friendPubKey, 'missed');
+
+    // 2. Display missed call notification
+    if (Platform.OS !== 'web') {
+      try {
+        const callerName = await resolveCallerName(friendPubKey);
+        const channelId = await notifee.createChannel({
+          id: 'dhambaal_missed_calls',
+          name: 'Missed Calls',
+          importance: AndroidImportance.HIGH,
+        });
+
+        await notifee.displayNotification({
+          title: 'Wicitaan ku dhaafay',
+          body: `Waxaad wicitaan ka heshay ${callerName}`,
+          android: {
+            channelId,
+            importance: AndroidImportance.HIGH,
+            smallIcon: 'ic_launcher',
+            pressAction: {
+              id: 'default',
+              launchActivity: 'default',
+            },
+          },
+        });
+      } catch (error) {
+        console.error('[CallService] Error posting missed call notification:', error);
+      }
+    }
+    return;
+  }
+
   activeCallContact = friendPubKey;
   isCallInitiator = false;
   emitCallConnectionStatus(friendPubKey, 'connecting');
@@ -365,7 +416,9 @@ export const handleIncomingOffer = async (friendPubKey, offerSdp) => {
         loopSound: true,
         category: AndroidCategory.CALL,
         visibility: AndroidVisibility.PUBLIC,
-        asForegroundService: true, // QASAB: Kani wuxuu diidayaa in popup-ka uu dhakhso isku xiro (wuxuu qasbayaa inuu noqdo mid buuxa)
+        smallIcon: 'ic_launcher', // Explicit launcher icon to prevent display crashes
+        // We removed asForegroundService: true because starting a foreground service
+        // from the background on Android 12+ crashes the application due to OS restrictions.
         fullScreenAction: {
           id: 'default',
         },

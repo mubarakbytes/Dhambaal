@@ -178,6 +178,22 @@ export default function RootLayout() {
     let cleanupPresence = null;
     let servicesStarted = false;
 
+    const checkForPendingCallAction = async () => {
+      try {
+        const pendingCall = await getAndClearPendingCallAction();
+        if (pendingCall && pendingCall.route) {
+          console.log('[Layout] App resumed with pending call action, navigating to:', pendingCall.route);
+          if (isNavigationReadyRef.current) {
+            router.push(pendingCall.route);
+          } else {
+            setInitialRoute(pendingCall.route);
+          }
+        }
+      } catch (err) {
+        console.error('[Layout] Error checking pending call action on resume:', err);
+      }
+    };
+
     const startServicesIfAuthenticated = async () => {
       try {
         const publicKey = await AsyncStorage.getItem('PUBLICK_KEY');
@@ -232,6 +248,8 @@ export default function RootLayout() {
         startServicesIfAuthenticated();
         // Hubi fariimaha qabyada ah
         void syncPendingDirectMessages();
+        // Check for pending call actions (e.g. from background notification clicks)
+        checkForPendingCallAction();
       }
     });
 

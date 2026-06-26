@@ -362,13 +362,18 @@ export const listenToActiveChats = (onChatsUpdate) => {
 
   // 1. Dhegeyso asxaabta
   gun.get('contacts').map().on((contactNode, key) => {
-    if (contactNode && !contactNode.deleted) {
-      contactNode.id = contactNode.id || key;
-      contactsMap[key] = contactNode;
-    } else {
-      delete contactsMap[key];
+    if (contactNode) {
+      if (contactNode.deleted) {
+        delete contactsMap[key];
+      } else {
+        contactNode.id = contactNode.id || key;
+        contactsMap[key] = {
+          ...contactsMap[key],
+          ...contactNode
+        };
+      }
+      rebuildChatList();
     }
-    rebuildChatList();
   });
 
   // 2. Dhegeyso fariimaha
