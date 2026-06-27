@@ -8,7 +8,8 @@ import {
   ScrollView, 
   useWindowDimensions, 
   Platform,
-  Image 
+  Image,
+  Clipboard 
 } from 'react-native';
 import { LinearGradient } from 'expo-linear-gradient';
 import { Ionicons } from '@expo/vector-icons';
@@ -20,6 +21,9 @@ const Gun = require('gun/gun');
 require('gun/sea');
 
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import * as DocumentPicker from 'expo-document-picker';
+import * as FileSystem from 'expo-file-system/legacy';
+import { hydrateDatabase } from '../src/services/storage';
 
 
 
@@ -158,6 +162,132 @@ export default function Index() {
     }
   };
 
+  const handleImportFile = async () => {
+    try {
+      const result = await DocumentPicker.getDocumentAsync({
+        type: 'application/json',
+        copyToCacheDirectory: true,
+      });
+
+      if (result.canceled || !result.assets || result.assets.length === 0) {
+        return;
+      }
+
+      const asset = result.assets[0];
+      let jsonContent = '';
+
+      if (Platform.OS === 'web') {
+        const file = asset.file;
+        if (file) {
+          jsonContent = await new Promise<string>((resolve, reject) => {
+            const reader = new FileReader();
+            reader.onload = (e) => resolve(e.target?.result as string);
+            reader.onerror = (e) => reject(new Error('FileReader error'));
+            reader.readAsText(file);
+          });
+        } else {
+          const response = await fetch(asset.uri);
+          jsonContent = await response.text();
+        }
+      } else {
+        jsonContent = await FileSystem.readAsStringAsync(asset.uri, {
+          encoding: FileSystem.EncodingType.UTF8,
+        });
+      }
+
+      const backup = JSON.parse(jsonContent);
+      if (!backup.USER_PAIR || !backup.PUBLICK_KEY) {
+        alert("Cillad: Faylkan ma ahan backup sax ah (ma laha USER_PAIR ama PUBLICK_KEY).");
+        return;
+      }
+
+      // Restoring account credentials
+      await AsyncStorage.setItem('PUBLICK_KEY', JSON.stringify(backup.USER_PAIR.pub));
+      await AsyncStorage.setItem('USER_PAIR', JSON.stringify(backup.USER_PAIR));
+      await AsyncStorage.setItem('DISPLAY_NAME', backup.DISPLAY_NAME || 'Isticmaale Sooceliyay');
+
+      // If it is a mobile backup, we can also restore lists
+      if (backup.type === 'mobile') {
+        // Restore binaries if present
+        if (backup.binaries) {
+          if (Platform.OS === 'web') {
+            for (const msgId in backup.binaries) {
+              const item = backup.binaries[msgId];
+              if (item.base64) {
+                localStorage.setItem('dh_voice_' + msgId, item.base64);
+              }
+              if (item.mimeType) {
+                localStorage.setItem('dh_voice_mime_' + msgId, item.mimeType);
+              }
+            }
+          } else {
+            // Mobile binary restore
+            const voiceDir = `${FileSystem.documentDirectory}.dhambaal_voice/`;
+            const filesDir = `${FileSystem.documentDirectory}Dhambaal_Files/`;
+
+            // Ensure directories exist
+            await FileSystem.makeDirectoryAsync(voiceDir, { intermediates: true }).catch(() => {});
+            await FileSystem.makeDirectoryAsync(filesDir, { intermediates: true }).catch(() => {});
+
+            for (const msgId in backup.binaries) {
+              const item = backup.binaries[msgId];
+              if (item.base64) {
+                if (item.type === 'voice') {
+                  const voicePath = `${voiceDir}${msgId}.m4a`;
+                  await FileSystem.writeAsStringAsync(voicePath, item.base64, {
+                    encoding: FileSystem.EncodingType.Base64,
+                  });
+                } else if (item.type === 'file' && item.fileName) {
+                  const safeName = item.fileName.replace(/[^a-zA-Z0-9.\-_]/g, '_');
+                  const filePath = `${filesDir}${safeName}`;
+                  await FileSystem.writeAsStringAsync(filePath, item.base64, {
+                    encoding: FileSystem.EncodingType.Base64,
+                  });
+                }
+              }
+            }
+
+            // Update fileUri and voiceNoteAudioUri in messages list to point to new local filesystem path
+            if (backup.messages_list) {
+              for (const m of backup.messages_list) {
+                if (m.type === 'file' && backup.binaries[m.id]) {
+                  const binary = backup.binaries[m.id];
+                  const safeName = binary.fileName.replace(/[^a-zA-Z0-9.\-_]/g, '_');
+                  m.fileUri = `${filesDir}${safeName}`;
+                } else if (m.type === 'voice') {
+                  const voiceId = m.voiceNoteMsgId || m.id;
+                  m.voiceNoteAudioUri = `${voiceDir}${voiceId}.m4a`;
+                }
+              }
+            }
+          }
+        }
+
+        if (backup.contacts_list) {
+          await AsyncStorage.setItem('rdhambaal_contacts_list', JSON.stringify(backup.contacts_list));
+        }
+        if (backup.contact_requests_list) {
+          await AsyncStorage.setItem('rdhambaal_contact_requests_list', JSON.stringify(backup.contact_requests_list));
+        }
+        if (backup.messages_list) {
+          await AsyncStorage.setItem('rdhambaal_messages_list', JSON.stringify(backup.messages_list));
+        }
+        if (backup.calls_list) {
+          await AsyncStorage.setItem('rdhambaal_calls_list', JSON.stringify(backup.calls_list));
+        }
+      }
+
+      // Hydrate GunDB graph with the new values
+      await hydrateDatabase();
+
+      alert("Guul: Xogtaadii waa lagu shubay aalada!");
+      router.replace('/(tabs)/fariimaha');
+    } catch (err: any) {
+      console.error('[Import] Error importing backup:', err);
+      alert(`Qalad: Ma awoodin inaan shubo faylka: ${err?.message || err}`);
+    }
+  };
+
   return (
     <LinearGradient
       colors={['#07070F', '#0D0C1D', '#090815']}
@@ -206,9 +336,11 @@ export default function Index() {
                   </LinearGradient>
                 </TouchableOpacity>
 
+                
+
                 <TouchableOpacity 
                   style={styles.secondaryButton}
-                  onPress={handleStartImport}
+                  onPress={handleImportFile}
                   activeOpacity={0.8}
                 >
                   <Ionicons name="cloud-download-outline" size={20} color="#E2E8F0" style={styles.buttonIcon} />

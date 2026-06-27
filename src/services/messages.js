@@ -7,8 +7,8 @@ import { Platform, AppState, DeviceEventEmitter } from 'react-native';
 import * as MediaLibrary from 'expo-media-library/legacy';
 
 // Safe Notifee Import
-let notifee: any = null;
-let AndroidImportance: any = { HIGH: 4 }; // Default value for safety
+let notifee = null;
+let AndroidImportance = { HIGH: 4 }; // Default value for safety
 try {
   if (Platform.OS !== 'web') {
     const notifeeLib = require('@notifee/react-native');

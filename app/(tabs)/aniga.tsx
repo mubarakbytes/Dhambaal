@@ -18,12 +18,15 @@ import { MadaxaMobilka } from '../../src/components/MadaxaMobilka';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { router } from 'expo-router';
 import { getCustomRelays, saveCustomRelays, getRelayStats, recordRelayAttempt, resetRelayStats } from '../../src/services/iceServers';
+import * as Sharing from 'expo-sharing';
+import * as FileSystem from 'expo-file-system/legacy';
 
 const SETTINGS = [
   { icon: 'notifications-outline' as const, label: 'Ogeysiisyada', sub: 'Maamul codadka iyo fariimaha' },
   { icon: 'shield-checkmark-outline' as const, label: 'Nabadgelyada', sub: 'Furayaasha sirta iyo tirtirida' },
   { icon: 'color-palette-outline' as const, label: 'Habmuuqa', sub: 'Madow / Iftiin' },
   { icon: 'globe-outline' as const, label: 'Xiriirka (Relay)', sub: 'Maamul server-kaaga xiriirka' },
+  { icon: 'download-outline' as const, label: 'Labax xogta', sub: 'La bax dhamaan xogtaada' },
 ];
 
 const fetchPublicKey = async (): Promise<string> => {
@@ -143,6 +146,155 @@ export default function AnigaScreen() {
     password: '',
     enabled: true,
   });
+
+  const performExport = async (target: 'web' | 'mobile') => {
+    try {
+      const pubKey = await AsyncStorage.getItem('PUBLICK_KEY');
+      const userPair = await AsyncStorage.getItem('USER_PAIR');
+      const displayName = await AsyncStorage.getItem('DISPLAY_NAME');
+
+      let exportData: any = {
+        type: target,
+        PUBLICK_KEY: pubKey ? JSON.parse(pubKey) : null,
+        USER_PAIR: userPair ? JSON.parse(userPair) : null,
+        DISPLAY_NAME: displayName,
+      };
+
+      if (target === 'mobile') {
+        const contacts = await AsyncStorage.getItem('rdhambaal_contacts_list');
+        const contactRequests = await AsyncStorage.getItem('rdhambaal_contact_requests_list');
+        const messages = await AsyncStorage.getItem('rdhambaal_messages_list');
+        const calls = await AsyncStorage.getItem('rdhambaal_calls_list');
+
+        exportData.contacts_list = contacts ? JSON.parse(contacts) : [];
+        exportData.contact_requests_list = contactRequests ? JSON.parse(contactRequests) : [];
+        exportData.messages_list = messages ? JSON.parse(messages) : [];
+        exportData.calls_list = calls ? JSON.parse(calls) : [];
+
+        // Package all voice notes and media files
+        const binaries: Record<string, any> = {};
+        if (Platform.OS === 'web') {
+          for (let i = 0; i < localStorage.length; i++) {
+            const key = localStorage.key(i);
+            if (key && key.startsWith('dh_voice_') && !key.startsWith('dh_voice_meta_') && !key.startsWith('dh_voice_mime_')) {
+              const msgId = key.replace('dh_voice_', '');
+              const base64 = localStorage.getItem(key);
+              const mimeType = localStorage.getItem('dh_voice_mime_' + msgId) || 'application/octet-stream';
+              
+              const msg = exportData.messages_list.find((m: any) => m.id === msgId || m.voiceNoteMsgId === msgId);
+              const type = msg ? msg.type : 'voice';
+              const fileName = msg ? msg.fileName : null;
+
+              if (base64) {
+                binaries[msgId] = {
+                  base64,
+                  mimeType,
+                  type,
+                  fileName,
+                };
+              }
+            }
+          }
+        } else {
+          for (const m of exportData.messages_list) {
+            const voiceId = m.type === 'voice' ? (m.voiceNoteMsgId || m.id) : null;
+            if (m.type === 'voice' && voiceId) {
+              const voicePath = `${FileSystem.documentDirectory}.dhambaal_voice/${voiceId}.m4a`;
+              try {
+                const info = await FileSystem.getInfoAsync(voicePath);
+                if (info.exists) {
+                  const base64 = await FileSystem.readAsStringAsync(voicePath, {
+                    encoding: FileSystem.EncodingType.Base64,
+                  });
+                  binaries[voiceId] = {
+                    base64,
+                    mimeType: m.voiceNote?.mimeType || 'audio/m4a',
+                    type: 'voice',
+                  };
+                }
+              } catch (err) {
+                console.warn(`[Export] Error reading voice note file for message ${m.id}:`, err);
+              }
+            } else if (m.type === 'file' && m.fileUri) {
+              try {
+                const info = await FileSystem.getInfoAsync(m.fileUri);
+                if (info.exists) {
+                  const base64 = await FileSystem.readAsStringAsync(m.fileUri, {
+                    encoding: FileSystem.EncodingType.Base64,
+                  });
+                  binaries[m.id] = {
+                    base64,
+                    mimeType: m.fileMimeType || 'application/octet-stream',
+                    type: 'file',
+                    fileName: m.fileName,
+                  };
+                }
+              } catch (err) {
+                console.warn(`[Export] Error reading shared file for message ${m.id}:`, err);
+              }
+            }
+          }
+        }
+        exportData.binaries = binaries;
+      }
+
+      const jsonString = JSON.stringify(exportData, null, 2);
+      const filename = `dhambaal_backup_${target}.json`;
+
+      if (Platform.OS === 'web') {
+        const blob = new Blob([jsonString], { type: 'application/json' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = filename;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+      } else {
+        const fileUri = `${FileSystem.cacheDirectory}${filename}`;
+        await FileSystem.writeAsStringAsync(fileUri, jsonString, {
+          encoding: FileSystem.EncodingType.UTF8,
+        });
+
+        const isAvailable = await Sharing.isAvailableAsync();
+        if (isAvailable) {
+          await Sharing.shareAsync(fileUri, {
+            mimeType: 'application/json',
+            dialogTitle: 'La bax xogta Dhambaal',
+            UTI: 'public.json',
+          });
+        } else {
+          Alert.alert('Qalad', 'Sharing ma ahan mid diyaar ah aaladaada.');
+        }
+      }
+    } catch (err: any) {
+      console.error('[Export] Error exporting data:', err);
+      Alert.alert('Qalad', `Lama soo bixi karo xogta: ${err?.message || err}`);
+    }
+  };
+
+  const handleExportData = () => {
+    Alert.alert(
+      'Labax Xogta (Export)',
+      'Halkee rabtaa in aad la aado xogtaada?',
+      [
+        {
+          text: 'Web (Kaliya Aqoonsiga)',
+          onPress: () => performExport('web'),
+        },
+        {
+          text: 'Mobile (Dhamaan Xogta)',
+          onPress: () => performExport('mobile'),
+        },
+        {
+          text: 'Jooji',
+          style: 'cancel'
+        }
+      ],
+      { cancelable: true }
+    );
+  };
 
   useEffect(() => {
     const loadProfileAndSettings = async () => {
@@ -730,6 +882,7 @@ export default function AnigaScreen() {
             if (s.icon.includes('shield')) setActiveModal('security');
             if (s.icon.includes('color-palette')) setActiveModal('appearance');
             if (s.icon.includes('globe')) setActiveModal('connection');
+            if (s.icon.includes('download')) handleExportData();
           }}
         >
           <View style={styles.settingIconBox}><Ionicons name={s.icon} size={18} color={Colors.onSurface} /></View>
