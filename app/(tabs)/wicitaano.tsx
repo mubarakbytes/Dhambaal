@@ -1,8 +1,9 @@
 import React, { useState, useEffect } from 'react';
 import {
-  View, Text, Platform, SafeAreaView, StatusBar, SectionList, StyleSheet, TouchableOpacity,
+  View, Text, Platform, StatusBar, SectionList, StyleSheet, TouchableOpacity,
   Pressable,
 } from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import { Colors, subscribeTheme } from '../../src/theme/colors';
@@ -151,7 +152,7 @@ export default function WicitaaanoScreen() {
     <WebSidebarLayout activeRoute="/(tabs)/wicitaano">
       <View style={styles.screenBg}>
         {!isWeb && (
-          <SafeAreaView style={{ paddingTop: Platform.OS === 'android' ? StatusBar.currentHeight ?? 0 : 0 }}>
+          <SafeAreaView edges={['top', 'left', 'right']}>
             <MadaxaMobilka ciwaan="Dhambaal" showSearchIcon={false} />
           </SafeAreaView>
         )}

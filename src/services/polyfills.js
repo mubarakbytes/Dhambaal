@@ -59,4 +59,16 @@ global.TextEncoder = TextEncoder;
 global.TextDecoder = TextDecoder;
 global.Buffer = Buffer;
 
-console.log('[Polyfill] Cryptography and Buffer environment successfully initialized.');
+// 4. Set up process and process.nextTick polyfills for web/browser environment
+if (typeof process === 'undefined') {
+  globalThis.process = {
+    browser: true,
+    env: { NODE_ENV: 'development' },
+    nextTick: (fn, ...args) => setTimeout(() => fn(...args), 0),
+  };
+} else if (!process.nextTick) {
+  process.nextTick = (fn, ...args) => setTimeout(() => fn(...args), 0);
+}
+
+console.log('[Polyfill] Cryptography, Buffer and Process environment successfully initialized.');
+

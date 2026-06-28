@@ -1,8 +1,9 @@
 import React, { useState, useEffect } from 'react';
 import {
   View, Text, FlatList, TouchableOpacity, StyleSheet,
-  Platform, SafeAreaView, StatusBar, Modal, TextInput, Alert, ScrollView
+  Platform, StatusBar, Modal, TextInput, Alert, ScrollView
 } from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import { CameraView, useCameraPermissions } from 'expo-camera';
 import { router } from 'expo-router';
@@ -491,7 +492,7 @@ export default function DadkaScreen() {
     <WebSidebarLayout activeRoute="/(tabs)/dadka">
       <View style={styles.screenBg}>
         {!isWeb && (
-          <SafeAreaView style={{ paddingTop: Platform.OS === 'android' ? StatusBar.currentHeight ?? 0 : 0 }}>
+          <SafeAreaView edges={['top', 'left', 'right']}>
             <MadaxaMobilka 
               ciwaan="Dhambaal"
               isSearching={isSearching} 
@@ -644,10 +645,10 @@ export default function DadkaScreen() {
                 </View>
               ) : (
                 <ScrollView style={styles.formWrapper} showsVerticalScrollIndicator={false} contentContainerStyle={{ paddingBottom: 40 }}>
-                  <Text style={styles.label}>Person Name</Text>
+                  <Text style={styles.label}>Magaca qofka</Text>
                   <TextInput
                     style={styles.input}
-                    placeholder="Gali magaca saaxiibkaa."
+                    placeholder="Tusaale: Mubaarak"
                     placeholderTextColor={Colors.onSurfaceVariant}
                     value={name}
                     onChangeText={setName}

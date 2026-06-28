@@ -5,6 +5,7 @@ import { Colors, subscribeTheme } from '../../src/theme/colors';
 import { Typography } from '../../src/theme/typography';
 import { Spacing } from '../../src/theme/spacing';
 import { useState, useEffect } from 'react';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 const TABS = [
   { name: 'fariimaha', label: 'Fariimaha', icon: 'chatbubbles' as const, iconOutline: 'chatbubbles-outline' as const },
@@ -17,6 +18,8 @@ function CustomTabBar({ state, navigation }: any) {
   // On web, sidebar handles navigation — hide bottom bar
   if (Platform.OS === 'web') return null;
 
+  const insets = useSafeAreaInsets();
+
   // Evaluate styles inside the render function so they update dynamically with the theme
   const styles = StyleSheet.create({
     tabBar: {
@@ -24,8 +27,8 @@ function CustomTabBar({ state, navigation }: any) {
       backgroundColor: Colors.surface, // dynamically updates dark vs light!
       borderTopWidth: 1,
       borderTopColor: Colors.glassPanelBorder,
-      height: Spacing.bottomNavHeight,
-      paddingBottom: 8,
+      height: Spacing.bottomNavHeight + insets.bottom,
+      paddingBottom: insets.bottom > 0 ? insets.bottom : 8,
     },
     tabItem: {
       flex: 1,

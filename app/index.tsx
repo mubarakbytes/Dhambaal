@@ -9,7 +9,8 @@ import {
   useWindowDimensions, 
   Platform,
   Image,
-  Clipboard 
+  Clipboard,
+  Modal
 } from 'react-native';
 import { LinearGradient } from 'expo-linear-gradient';
 import { Ionicons } from '@expo/vector-icons';
@@ -24,6 +25,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as DocumentPicker from 'expo-document-picker';
 import * as FileSystem from 'expo-file-system/legacy';
 import { hydrateDatabase } from '../src/services/storage';
+import { decryptString } from '../src/services/backupCrypto';
 
 
 
@@ -43,6 +45,10 @@ export default function Index() {
   const [importWords, setImportWords] = useState('');
   const [hasCopied, setHasCopied] = useState(false);
   const [generatedKeyPair, setGeneratedKeyPair] = useState<any>(null);
+
+  const [showImportPinModal, setShowImportPinModal] = useState(false);
+  const [importedBackup, setImportedBackup] = useState<any>(null);
+  const [importPinInput, setImportPinInput] = useState('');
 
   const [isChecking, setIsChecking] = useState(true);
 
@@ -162,6 +168,90 @@ export default function Index() {
     }
   };
 
+  const performRestoreData = async (backup: any) => {
+    // Restoring account credentials
+    await AsyncStorage.setItem('PUBLICK_KEY', JSON.stringify(backup.USER_PAIR.pub));
+    await AsyncStorage.setItem('USER_PAIR', JSON.stringify(backup.USER_PAIR));
+    await AsyncStorage.setItem('DISPLAY_NAME', backup.DISPLAY_NAME || 'Isticmaale Sooceliyay');
+
+    // If it is a mobile or web backup with data, we can also restore lists
+    if (backup.type === 'mobile' || backup.type === 'web') {
+      // Restore binaries if present
+      if (backup.binaries) {
+        if (Platform.OS === 'web') {
+          for (const msgId in backup.binaries) {
+            const item = backup.binaries[msgId];
+            if (item.base64) {
+              localStorage.setItem('dh_voice_' + msgId, item.base64);
+            }
+            if (item.mimeType) {
+              localStorage.setItem('dh_voice_mime_' + msgId, item.mimeType);
+            }
+          }
+        } else {
+          // Mobile binary restore
+          const voiceDir = `${FileSystem.documentDirectory}.dhambaal_voice/`;
+          const filesDir = `${FileSystem.documentDirectory}Dhambaal_Files/`;
+
+          // Ensure directories exist
+          await FileSystem.makeDirectoryAsync(voiceDir, { intermediates: true }).catch(() => {});
+          await FileSystem.makeDirectoryAsync(filesDir, { intermediates: true }).catch(() => {});
+
+          for (const msgId in backup.binaries) {
+            const item = backup.binaries[msgId];
+            if (item.base64) {
+              if (item.type === 'voice') {
+                const voicePath = `${voiceDir}${msgId}.m4a`;
+                await FileSystem.writeAsStringAsync(voicePath, item.base64, {
+                  encoding: FileSystem.EncodingType.Base64,
+                });
+              } else if (item.type === 'file' && item.fileName) {
+                const safeName = item.fileName.replace(/[^a-zA-Z0-9.\-_]/g, '_');
+                const filePath = `${filesDir}${safeName}`;
+                await FileSystem.writeAsStringAsync(filePath, item.base64, {
+                  encoding: FileSystem.EncodingType.Base64,
+                });
+              }
+            }
+          }
+
+          // Update fileUri and voiceNoteAudioUri in messages list to point to new local filesystem path
+          if (backup.messages_list) {
+            for (const m of backup.messages_list) {
+              if (m.type === 'file' && backup.binaries[m.id]) {
+                const binary = backup.binaries[m.id];
+                const safeName = binary.fileName.replace(/[^a-zA-Z0-9.\-_]/g, '_');
+                m.fileUri = `${filesDir}${safeName}`;
+              } else if (m.type === 'voice') {
+                const voiceId = m.voiceNoteMsgId || m.id;
+                m.voiceNoteAudioUri = `${voiceDir}${voiceId}.m4a`;
+              }
+            }
+          }
+        }
+      }
+
+      if (backup.contacts_list) {
+        await AsyncStorage.setItem('rdhambaal_contacts_list', JSON.stringify(backup.contacts_list));
+      }
+      if (backup.contact_requests_list) {
+        await AsyncStorage.setItem('rdhambaal_contact_requests_list', JSON.stringify(backup.contact_requests_list));
+      }
+      if (backup.messages_list) {
+        await AsyncStorage.setItem('rdhambaal_messages_list', JSON.stringify(backup.messages_list));
+      }
+      if (backup.calls_list) {
+        await AsyncStorage.setItem('rdhambaal_calls_list', JSON.stringify(backup.calls_list));
+      }
+    }
+
+    // Hydrate GunDB graph with the new values
+    await hydrateDatabase();
+
+    alert("Guul: Xogtaadii waa lagu shubay aalada!");
+    router.replace('/(tabs)/fariimaha');
+  };
+
   const handleImportFile = async () => {
     try {
       const result = await DocumentPicker.getDocumentAsync({
@@ -196,96 +286,155 @@ export default function Index() {
       }
 
       const backup = JSON.parse(jsonContent);
+
+      // Check if it is a secure encrypted backup file
+      if (backup.encryptedPair && backup.encryptedData) {
+        setImportedBackup(backup);
+        setImportPinInput('');
+        setShowImportPinModal(true);
+        return;
+      }
+
+      // Fallback for legacy unencrypted backup files
       if (!backup.USER_PAIR || !backup.PUBLICK_KEY) {
         alert("Cillad: Faylkan ma ahan backup sax ah (ma laha USER_PAIR ama PUBLICK_KEY).");
         return;
       }
 
-      // Restoring account credentials
-      await AsyncStorage.setItem('PUBLICK_KEY', JSON.stringify(backup.USER_PAIR.pub));
-      await AsyncStorage.setItem('USER_PAIR', JSON.stringify(backup.USER_PAIR));
-      await AsyncStorage.setItem('DISPLAY_NAME', backup.DISPLAY_NAME || 'Isticmaale Sooceliyay');
-
-      // If it is a mobile backup, we can also restore lists
-      if (backup.type === 'mobile') {
-        // Restore binaries if present
-        if (backup.binaries) {
-          if (Platform.OS === 'web') {
-            for (const msgId in backup.binaries) {
-              const item = backup.binaries[msgId];
-              if (item.base64) {
-                localStorage.setItem('dh_voice_' + msgId, item.base64);
-              }
-              if (item.mimeType) {
-                localStorage.setItem('dh_voice_mime_' + msgId, item.mimeType);
-              }
-            }
-          } else {
-            // Mobile binary restore
-            const voiceDir = `${FileSystem.documentDirectory}.dhambaal_voice/`;
-            const filesDir = `${FileSystem.documentDirectory}Dhambaal_Files/`;
-
-            // Ensure directories exist
-            await FileSystem.makeDirectoryAsync(voiceDir, { intermediates: true }).catch(() => {});
-            await FileSystem.makeDirectoryAsync(filesDir, { intermediates: true }).catch(() => {});
-
-            for (const msgId in backup.binaries) {
-              const item = backup.binaries[msgId];
-              if (item.base64) {
-                if (item.type === 'voice') {
-                  const voicePath = `${voiceDir}${msgId}.m4a`;
-                  await FileSystem.writeAsStringAsync(voicePath, item.base64, {
-                    encoding: FileSystem.EncodingType.Base64,
-                  });
-                } else if (item.type === 'file' && item.fileName) {
-                  const safeName = item.fileName.replace(/[^a-zA-Z0-9.\-_]/g, '_');
-                  const filePath = `${filesDir}${safeName}`;
-                  await FileSystem.writeAsStringAsync(filePath, item.base64, {
-                    encoding: FileSystem.EncodingType.Base64,
-                  });
-                }
-              }
-            }
-
-            // Update fileUri and voiceNoteAudioUri in messages list to point to new local filesystem path
-            if (backup.messages_list) {
-              for (const m of backup.messages_list) {
-                if (m.type === 'file' && backup.binaries[m.id]) {
-                  const binary = backup.binaries[m.id];
-                  const safeName = binary.fileName.replace(/[^a-zA-Z0-9.\-_]/g, '_');
-                  m.fileUri = `${filesDir}${safeName}`;
-                } else if (m.type === 'voice') {
-                  const voiceId = m.voiceNoteMsgId || m.id;
-                  m.voiceNoteAudioUri = `${voiceDir}${voiceId}.m4a`;
-                }
-              }
-            }
-          }
-        }
-
-        if (backup.contacts_list) {
-          await AsyncStorage.setItem('rdhambaal_contacts_list', JSON.stringify(backup.contacts_list));
-        }
-        if (backup.contact_requests_list) {
-          await AsyncStorage.setItem('rdhambaal_contact_requests_list', JSON.stringify(backup.contact_requests_list));
-        }
-        if (backup.messages_list) {
-          await AsyncStorage.setItem('rdhambaal_messages_list', JSON.stringify(backup.messages_list));
-        }
-        if (backup.calls_list) {
-          await AsyncStorage.setItem('rdhambaal_calls_list', JSON.stringify(backup.calls_list));
-        }
-      }
-
-      // Hydrate GunDB graph with the new values
-      await hydrateDatabase();
-
-      alert("Guul: Xogtaadii waa lagu shubay aalada!");
-      router.replace('/(tabs)/fariimaha');
+      await performRestoreData(backup);
     } catch (err: any) {
       console.error('[Import] Error importing backup:', err);
       alert(`Qalad: Ma awoodin inaan shubo faylka: ${err?.message || err}`);
     }
+  };
+
+  const handleVerifyImportPin = async () => {
+    const pin = importPinInput.trim();
+    if (!pin) {
+      alert("Fadlan geli fure sireedka!");
+      return;
+    }
+
+    try {
+      // 1. Decrypt keypair using the PIN
+      const decryptedPairStr = await Gun.SEA.decrypt(importedBackup.encryptedPair, pin);
+      if (!decryptedPairStr) {
+        alert("Cillad: Fure sireedku waa qalad ama faylka waa uu waxyeeloobay!");
+        return;
+      }
+
+      const decryptedPair = typeof decryptedPairStr === 'string' ? JSON.parse(decryptedPairStr) : decryptedPairStr;
+      if (!decryptedPair.pub || !decryptedPair.priv) {
+        alert("Cillad: Furayaasha la helay ma ahan kuwo sax ah.");
+        return;
+      }
+
+      // 2. Decrypt chat data lists using the PIN with high-performance stream cipher
+      const decryptedDataStr = decryptString(importedBackup.encryptedData, pin);
+      let lists: any = {
+        contacts_list: [],
+        contact_requests_list: [],
+        messages_list: [],
+        calls_list: [],
+        binaries: {},
+      };
+
+      if (decryptedDataStr) {
+        const parsed = typeof decryptedDataStr === 'string' ? JSON.parse(decryptedDataStr) : decryptedDataStr;
+        lists = parsed;
+      }
+
+      // 3. Assemble backup object
+      const backup = {
+        type: importedBackup.type,
+        PUBLICK_KEY: decryptedPair.pub,
+        USER_PAIR: decryptedPair,
+        DISPLAY_NAME: importedBackup.DISPLAY_NAME,
+        contacts_list: lists.contacts_list || [],
+        contact_requests_list: lists.contact_requests_list || [],
+        messages_list: lists.messages_list || [],
+        calls_list: lists.calls_list || [],
+        binaries: lists.binaries || {},
+      };
+
+      // 4. Save PIN hash locally on the new device
+      const pinHash = await Gun.SEA.work(pin, null, null, { name: 'SHA-256' });
+      await AsyncStorage.setItem('rdhambaal_export_pin_hash', pinHash);
+
+      setShowImportPinModal(false);
+      setImportedBackup(null);
+      setImportPinInput('');
+
+      await performRestoreData(backup);
+    } catch (e: any) {
+      console.error('[Import] Error decrypting backup:', e);
+      alert("Cillad: Fure sireedka aad gelisay waa qalad!");
+    }
+  };
+
+  const renderImportPinModal = () => {
+    if (!showImportPinModal) return null;
+    return (
+      <Modal visible={true} animationType="slide" transparent={true}>
+        <View style={styles.modalOverlay}>
+          <TouchableOpacity 
+            style={styles.modalDismissArea} 
+            onPress={() => {
+              setShowImportPinModal(false);
+              setImportedBackup(null);
+            }} 
+            activeOpacity={1} 
+          />
+          <View style={[styles.modalContent, isWeb && styles.modalContentWeb]}>
+            <View style={styles.modalHeader}>
+              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+                <Ionicons name="lock-closed-outline" size={20} color="#FFFFFF" />
+                <Text style={styles.modalTitle}>Ku Fur Fure Sireedka</Text>
+              </View>
+              <TouchableOpacity 
+                onPress={() => {
+                  setShowImportPinModal(false);
+                  setImportedBackup(null);
+                }} 
+                style={styles.modalCloseBtn}
+              >
+                <Ionicons name="close" size={20} color="#FFFFFF" />
+              </TouchableOpacity>
+            </View>
+            <ScrollView style={styles.modalBody} showsVerticalScrollIndicator={false}>
+              <Text style={styles.modalSubtitle}>
+                Faylkan waa uu ku xiran yahay (waa encrypted). Fadlan geli fure sireedkii/password-kii aad ku ilaalisaay markaad xogta la baxaysay:
+              </Text>
+
+              <View style={styles.modalOptionGroup}>
+                <Text style={styles.keyLabel}>Fure Sireedka (Security PIN)</Text>
+                <TextInput
+                  style={styles.inputField}
+                  placeholder="Gali fure sireedka"
+                  placeholderTextColor="#A0AEC0"
+                  secureTextEntry
+                  value={importPinInput}
+                  onChangeText={setImportPinInput}
+                />
+              </View>
+
+              <TouchableOpacity 
+                style={[styles.primaryButton, { marginTop: 16 }]}
+                onPress={handleVerifyImportPin}
+                activeOpacity={0.8}
+              >
+                <LinearGradient
+                  colors={['#6366F1', '#8B5CF6']}
+                  style={styles.gradientButton}
+                >
+                  <Text style={styles.primaryButtonText}>Gali & Fur Xogta</Text>
+                </LinearGradient>
+              </TouchableOpacity>
+            </ScrollView>
+          </View>
+        </View>
+      </Modal>
+    );
   };
 
   return (
@@ -455,6 +604,7 @@ export default function Index() {
 
         </View>
       </ScrollView>
+      {renderImportPinModal()}
     </LinearGradient>
   );
 }
@@ -774,5 +924,85 @@ const styles = StyleSheet.create({
   ooText: {
     color: '#fcaba5', // A light purple/indigo that looks great on top of the gradient background
     // color: '#F59E0B', // Alternatively, use this gold/yellow if you want it to pop aggressively!
+  },
+  modalOverlay: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    backgroundColor: 'rgba(0, 0, 0, 0.75)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    zIndex: 9999,
+  },
+  modalDismissArea: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+  },
+  modalContent: {
+    width: '90%',
+    maxWidth: 480,
+    backgroundColor: '#0F0E26',
+    borderRadius: 20,
+    padding: 24,
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.1)',
+    alignSelf: 'center',
+  },
+  modalContentWeb: {
+    width: 480,
+  },
+  modalHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingBottom: 16,
+    borderBottomWidth: 1,
+    borderBottomColor: 'rgba(255, 255, 255, 0.1)',
+    marginBottom: 16,
+  },
+  modalTitle: {
+    fontSize: 18,
+    fontWeight: 'bold',
+    color: '#FFFFFF',
+  },
+  modalCloseBtn: {
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    backgroundColor: 'rgba(255, 255, 255, 0.05)',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  modalBody: {
+    maxHeight: 400,
+  },
+  modalSubtitle: {
+    fontSize: 14,
+    color: '#A0AEC0',
+    lineHeight: 20,
+    marginBottom: 20,
+  },
+  modalOptionGroup: {
+    marginBottom: 16,
+  },
+  keyLabel: {
+    fontSize: 13,
+    fontWeight: '600',
+    color: '#A0AEC0',
+    marginBottom: 8,
+  },
+  inputField: {
+    backgroundColor: 'rgba(255, 255, 255, 0.03)',
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.08)',
+    borderRadius: 12,
+    padding: 12,
+    color: '#FFFFFF',
+    fontSize: 15,
   },
 });

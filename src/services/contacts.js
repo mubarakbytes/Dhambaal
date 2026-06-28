@@ -94,11 +94,13 @@ export const listenToContacts = (onContactsUpdate) => {
           ...contactNode
         };
       }
-
-      onContactsUpdate(
-        Object.values(contactsMap).filter((contact) => contact && !contact.deleted)
-      );
+    } else {
+      delete contactsMap[key];
     }
+
+    onContactsUpdate(
+      Object.values(contactsMap).filter((contact) => contact && !contact.deleted)
+    );
   });
 
   return () => {

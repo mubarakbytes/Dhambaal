@@ -3,6 +3,7 @@ import '../src/services/messages';
 import '../src/services/contactRequests';
 import { Stack, SplashScreen, useRouter, useRootNavigationState } from 'expo-router';
 import React, { useEffect, useState } from 'react';
+import { SafeAreaProvider } from 'react-native-safe-area-context';
 import { StatusBar } from 'expo-status-bar';
 import { Platform, AppState, AppStateStatus } from 'react-native';
 import { ThemeProvider, DarkTheme, DefaultTheme } from 'expo-router/react-navigation';
@@ -396,28 +397,30 @@ export default function RootLayout() {
   };
 
   return (
-    <ThemeProvider value={customTheme}>
-      <StatusBar style={isLight ? 'dark' : 'light'} backgroundColor={Colors.background} />
-      <Stack
-        screenOptions={{
-          headerShown: false,
-          contentStyle: { backgroundColor: Colors.background },
-          animation: 'slide_from_right',
-        }}
-      >
-        {/* 4. Ensure index is registered in your Stack layout */}
-        <Stack.Screen name="index" options={{ headerShown: false }} />
-        <Stack.Screen name="(tabs)" options={{ headerShown: false }} />
-        <Stack.Screen
-          name="fariin/[id]"
-          options={{
+    <SafeAreaProvider>
+      <ThemeProvider value={customTheme}>
+        <StatusBar style={isLight ? 'dark' : 'light'} backgroundColor={Colors.background} />
+        <Stack
+          screenOptions={{
             headerShown: false,
             contentStyle: { backgroundColor: Colors.background },
             animation: 'slide_from_right',
-            detachPreviousScreen: false,
           }}
-        />
-      </Stack>
-    </ThemeProvider>
+        >
+          {/* 4. Ensure index is registered in your Stack layout */}
+          <Stack.Screen name="index" options={{ headerShown: false }} />
+          <Stack.Screen name="(tabs)" options={{ headerShown: false }} />
+          <Stack.Screen
+            name="fariin/[id]"
+            options={{
+              headerShown: false,
+              contentStyle: { backgroundColor: Colors.background },
+              animation: 'slide_from_right',
+              detachPreviousScreen: false,
+            }}
+          />
+        </Stack>
+      </ThemeProvider>
+    </SafeAreaProvider>
   );
 }

@@ -1,9 +1,10 @@
 import React, { useState, useEffect } from 'react';
 import {
   View, Text, TouchableOpacity, StyleSheet, Platform,
-  SafeAreaView, StatusBar, ScrollView, Share, Alert, Clipboard, TextInput,
+  StatusBar, ScrollView, Share, Alert, Clipboard, TextInput,
   Modal, Switch, FlatList, ActivityIndicator
 } from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import QRCodeSVG from 'react-native-qrcode-svg';
 
@@ -16,14 +17,22 @@ import { GlassPanel } from '../../src/components/GlassPanel';
 import { WebSidebarLayout } from '../../src/components/WebSidebarLayout';
 import { MadaxaMobilka } from '../../src/components/MadaxaMobilka';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { router } from 'expo-router';
+import { router, useNavigation } from 'expo-router';
 import { getCustomRelays, saveCustomRelays, getRelayStats, recordRelayAttempt, resetRelayStats } from '../../src/services/iceServers';
+import { wipeAllData } from '../../src/services/storage';
+import { shutdownConnectionService } from '../../src/services/connection';
+import { handleEndCall } from '../../src/services/callService';
+import { encryptString } from '../../src/services/backupCrypto';
 import * as Sharing from 'expo-sharing';
 import * as FileSystem from 'expo-file-system/legacy';
+
+const Gun = require('gun/gun');
+require('gun/sea');
 
 const SETTINGS = [
   { icon: 'notifications-outline' as const, label: 'Ogeysiisyada', sub: 'Maamul codadka iyo fariimaha' },
   { icon: 'shield-checkmark-outline' as const, label: 'Nabadgelyada', sub: 'Furayaasha sirta iyo tirtirida' },
+  { icon: 'key-outline' as const, label: 'Fure Sireed', sub: 'Hubi amniga xogtaada' },
   { icon: 'color-palette-outline' as const, label: 'Habmuuqa', sub: 'Madow / Iftiin' },
   { icon: 'globe-outline' as const, label: 'Xiriirka (Relay)', sub: 'Maamul server-kaaga xiriirka' },
   { icon: 'download-outline' as const, label: 'Labax xogta', sub: 'La bax dhamaan xogtaada' },
@@ -117,6 +126,17 @@ export default function AnigaScreen() {
     return unsubscribe;
   }, []);
 
+  const navigation = useNavigation();
+  useEffect(() => {
+    const unsubscribe = navigation.addListener('focus', () => {
+      // Force clear export/security verification state on tab navigation/focus
+      setShowExportVerifyModal(false);
+      setExportPinInput('');
+      setExportTarget(null);
+    });
+    return unsubscribe;
+  }, [navigation]);
+
   const [PUBLIC_KEY, setPUBLIC_KEY] = useState<string>('Loading...');
   const [displayName, setDisplayName] = useState<string>('Isticmaale');
   const [isCopy, setIsCopy] = useState<boolean>(false);
@@ -147,98 +167,133 @@ export default function AnigaScreen() {
     enabled: true,
   });
 
-  const performExport = async (target: 'web' | 'mobile') => {
+  // PIN Security States
+  const [hasPin, setHasPin] = useState<boolean>(false);
+  const [showPinModal, setShowPinModal] = useState<boolean>(false);
+  const [oldPinInput, setOldPinInput] = useState<string>('');
+  const [newPinInput, setNewPinInput] = useState<string>('');
+  const [confirmPinInput, setConfirmPinInput] = useState<string>('');
+  const [showExportVerifyModal, setShowExportVerifyModal] = useState<boolean>(false);
+  const [exportTarget, setExportTarget] = useState<'web' | 'mobile' | null>(null);
+  const [exportPinInput, setExportPinInput] = useState<string>('');
+
+  const performExport = async (target: 'web' | 'mobile', pin: string) => {
     try {
-      const pubKey = await AsyncStorage.getItem('PUBLICK_KEY');
-      const userPair = await AsyncStorage.getItem('USER_PAIR');
+      const userPairStr = await AsyncStorage.getItem('USER_PAIR');
       const displayName = await AsyncStorage.getItem('DISPLAY_NAME');
 
-      let exportData: any = {
-        type: target,
-        PUBLICK_KEY: pubKey ? JSON.parse(pubKey) : null,
-        USER_PAIR: userPair ? JSON.parse(userPair) : null,
-        DISPLAY_NAME: displayName,
-      };
+      if (!userPairStr) {
+        Alert.alert('Qalad', 'Ma awoodin inaan helo macluumaadka furayaashaada.');
+        return;
+      }
 
-      if (target === 'mobile') {
-        const contacts = await AsyncStorage.getItem('rdhambaal_contacts_list');
-        const contactRequests = await AsyncStorage.getItem('rdhambaal_contact_requests_list');
-        const messages = await AsyncStorage.getItem('rdhambaal_messages_list');
-        const calls = await AsyncStorage.getItem('rdhambaal_calls_list');
+      const userPair = JSON.parse(userPairStr);
+      // 1. Encrypt private keys with the user PIN
+      const encryptedPair = await Gun.SEA.encrypt(userPairStr, pin);
 
-        exportData.contacts_list = contacts ? JSON.parse(contacts) : [];
-        exportData.contact_requests_list = contactRequests ? JSON.parse(contactRequests) : [];
-        exportData.messages_list = messages ? JSON.parse(messages) : [];
-        exportData.calls_list = calls ? JSON.parse(calls) : [];
+      let binaries: Record<string, any> = {};
+      let contacts: any[] = [];
+      let contactRequests: any[] = [];
+      let messages: any[] = [];
+      let calls: any[] = [];
 
-        // Package all voice notes and media files
-        const binaries: Record<string, any> = {};
-        if (Platform.OS === 'web') {
-          for (let i = 0; i < localStorage.length; i++) {
-            const key = localStorage.key(i);
-            if (key && key.startsWith('dh_voice_') && !key.startsWith('dh_voice_meta_') && !key.startsWith('dh_voice_mime_')) {
-              const msgId = key.replace('dh_voice_', '');
-              const base64 = localStorage.getItem(key);
-              const mimeType = localStorage.getItem('dh_voice_mime_' + msgId) || 'application/octet-stream';
-              
-              const msg = exportData.messages_list.find((m: any) => m.id === msgId || m.voiceNoteMsgId === msgId);
-              const type = msg ? msg.type : 'voice';
-              const fileName = msg ? msg.fileName : null;
+      // Always collect all database lists for the backup
+      const storedContacts = await AsyncStorage.getItem('rdhambaal_contacts_list');
+      const storedRequests = await AsyncStorage.getItem('rdhambaal_contact_requests_list');
+      const storedMessages = await AsyncStorage.getItem('rdhambaal_messages_list');
+      const storedCalls = await AsyncStorage.getItem('rdhambaal_calls_list');
 
-              if (base64) {
-                binaries[msgId] = {
-                  base64,
-                  mimeType,
-                  type,
-                  fileName,
-                };
-              }
-            }
-          }
-        } else {
-          for (const m of exportData.messages_list) {
-            const voiceId = m.type === 'voice' ? (m.voiceNoteMsgId || m.id) : null;
-            if (m.type === 'voice' && voiceId) {
-              const voicePath = `${FileSystem.documentDirectory}.dhambaal_voice/${voiceId}.m4a`;
-              try {
-                const info = await FileSystem.getInfoAsync(voicePath);
-                if (info.exists) {
-                  const base64 = await FileSystem.readAsStringAsync(voicePath, {
-                    encoding: FileSystem.EncodingType.Base64,
-                  });
-                  binaries[voiceId] = {
-                    base64,
-                    mimeType: m.voiceNote?.mimeType || 'audio/m4a',
-                    type: 'voice',
-                  };
-                }
-              } catch (err) {
-                console.warn(`[Export] Error reading voice note file for message ${m.id}:`, err);
-              }
-            } else if (m.type === 'file' && m.fileUri) {
-              try {
-                const info = await FileSystem.getInfoAsync(m.fileUri);
-                if (info.exists) {
-                  const base64 = await FileSystem.readAsStringAsync(m.fileUri, {
-                    encoding: FileSystem.EncodingType.Base64,
-                  });
-                  binaries[m.id] = {
-                    base64,
-                    mimeType: m.fileMimeType || 'application/octet-stream',
-                    type: 'file',
-                    fileName: m.fileName,
-                  };
-                }
-              } catch (err) {
-                console.warn(`[Export] Error reading shared file for message ${m.id}:`, err);
-              }
+      contacts = storedContacts ? JSON.parse(storedContacts) : [];
+      contactRequests = storedRequests ? JSON.parse(storedRequests) : [];
+      messages = storedMessages ? JSON.parse(storedMessages) : [];
+      calls = storedCalls ? JSON.parse(storedCalls) : [];
+
+      // Package all voice notes and media files
+      if (Platform.OS === 'web') {
+        for (let i = 0; i < localStorage.length; i++) {
+          const key = localStorage.key(i);
+          if (key && key.startsWith('dh_voice_') && !key.startsWith('dh_voice_meta_') && !key.startsWith('dh_voice_mime_')) {
+            const msgId = key.replace('dh_voice_', '');
+            const base64 = localStorage.getItem(key);
+            const mimeType = localStorage.getItem('dh_voice_mime_' + msgId) || 'application/octet-stream';
+            
+            const msg = messages.find((m: any) => m.id === msgId || m.voiceNoteMsgId === msgId);
+            const type = msg ? msg.type : 'voice';
+            const fileName = msg ? msg.fileName : null;
+
+            if (base64) {
+              binaries[msgId] = {
+                base64,
+                mimeType,
+                type,
+                fileName,
+              };
             }
           }
         }
-        exportData.binaries = binaries;
+      } else {
+        for (const m of messages) {
+          const voiceId = m.type === 'voice' ? (m.voiceNoteMsgId || m.id) : null;
+          if (m.type === 'voice' && voiceId) {
+            const voicePath = `${FileSystem.documentDirectory}.dhambaal_voice/${voiceId}.m4a`;
+            try {
+              const info = await FileSystem.getInfoAsync(voicePath);
+              if (info.exists) {
+                const base64 = await FileSystem.readAsStringAsync(voicePath, {
+                  encoding: FileSystem.EncodingType.Base64,
+                });
+                binaries[voiceId] = {
+                  base64,
+                  mimeType: m.voiceNote?.mimeType || 'audio/m4a',
+                  type: 'voice',
+                };
+              }
+            } catch (err) {
+              console.warn(`[Export] Error reading voice note file for message ${m.id}:`, err);
+            }
+          } else if (m.type === 'file' && m.fileUri) {
+            try {
+              const info = await FileSystem.getInfoAsync(m.fileUri);
+              if (info.exists) {
+                const base64 = await FileSystem.readAsStringAsync(m.fileUri, {
+                  encoding: FileSystem.EncodingType.Base64,
+                });
+                binaries[m.id] = {
+                  base64,
+                  mimeType: m.fileMimeType || 'application/octet-stream',
+                  type: 'file',
+                  fileName: m.fileName,
+                };
+              }
+            } catch (err) {
+              console.warn(`[Export] Error reading shared file for message ${m.id}:`, err);
+            }
+          }
+        }
       }
 
-      const jsonString = JSON.stringify(exportData, null, 2);
+      // 2. Encrypt all chat lists and binaries using the user PIN to ensure 100% compatibility
+      // even if the user keypair lacks epub/epriv keys.
+      const listsPayload = {
+        contacts_list: contacts,
+        contact_requests_list: contactRequests,
+        messages_list: messages,
+        calls_list: calls,
+        binaries: binaries,
+      };
+      // Encrypt lists and binaries using high-performance stream cipher
+      const encryptedData = encryptString(JSON.stringify(listsPayload), pin);
+
+      // 3. Assemble secure export payload
+      const secureExport = {
+        type: target,
+        PUBLICK_KEY: userPair.pub,
+        DISPLAY_NAME: displayName || 'Isticmaale',
+        encryptedPair: encryptedPair,
+        encryptedData: encryptedData,
+      };
+
+      const jsonString = JSON.stringify(secureExport, null, 2);
       const filename = `dhambaal_backup_${target}.json`;
 
       if (Platform.OS === 'web') {
@@ -252,20 +307,81 @@ export default function AnigaScreen() {
         document.body.removeChild(a);
         URL.revokeObjectURL(url);
       } else {
-        const fileUri = `${FileSystem.cacheDirectory}${filename}`;
+        const fileUri = `${FileSystem.documentDirectory || FileSystem.cacheDirectory}${filename}`;
         await FileSystem.writeAsStringAsync(fileUri, jsonString, {
           encoding: FileSystem.EncodingType.UTF8,
         });
 
-        const isAvailable = await Sharing.isAvailableAsync();
-        if (isAvailable) {
-          await Sharing.shareAsync(fileUri, {
-            mimeType: 'application/json',
-            dialogTitle: 'La bax xogta Dhambaal',
-            UTI: 'public.json',
-          });
+        if (Platform.OS === 'android') {
+          Alert.alert(
+            'La Bax Xogta',
+            'Faylka backup-ka ma rabtaa in aad u kaydiso aaladda mise in aad la wadaagto abbaabo kale?',
+            [
+              {
+                text: 'U kaydi aaladda (Download)',
+                onPress: async () => {
+                  try {
+                    const SAF = FileSystem.StorageAccessFramework;
+                    if (SAF) {
+                      const permissions = await SAF.requestDirectoryPermissionsAsync();
+                      if (permissions.granted) {
+                        const directoryUri = permissions.directoryUri;
+                        const newFileUri = await SAF.createFileAsync(
+                          directoryUri,
+                          filename,
+                          'application/json'
+                        );
+                        await FileSystem.writeAsStringAsync(newFileUri, jsonString, {
+                          encoding: FileSystem.EncodingType.UTF8,
+                        });
+                        Alert.alert('Guul', 'Backup-ka waxaa lagu kaydiyay gal-ka aad dooratay! ✅');
+                      }
+                    } else {
+                      const isAvailable = await Sharing.isAvailableAsync();
+                      if (isAvailable) {
+                        await Sharing.shareAsync(fileUri, {
+                          mimeType: 'application/json',
+                          dialogTitle: 'La bax xogta Dhambaal',
+                          UTI: 'public.json',
+                        });
+                      }
+                    }
+                  } catch (err: any) {
+                    console.error('[Export] Error saving via SAF:', err);
+                    Alert.alert('Qalad', `Ma awoodin inaan kaydiyo faylka: ${err?.message || err}`);
+                  }
+                }
+              },
+              {
+                text: 'La wadaag (Share)',
+                onPress: async () => {
+                  const isAvailable = await Sharing.isAvailableAsync();
+                  if (isAvailable) {
+                    await Sharing.shareAsync(fileUri, {
+                      mimeType: 'application/json',
+                      dialogTitle: 'La bax xogta Dhambaal',
+                      UTI: 'public.json',
+                    });
+                  } else {
+                    Alert.alert('Qalad', 'Sharing ma ahan mid diyaar ah aaladaada.');
+                  }
+                }
+              },
+              { text: 'Kansal', style: 'cancel' }
+            ]
+          );
         } else {
-          Alert.alert('Qalad', 'Sharing ma ahan mid diyaar ah aaladaada.');
+          // iOS natively includes "Save to Files" in shareAsync sheet
+          const isAvailable = await Sharing.isAvailableAsync();
+          if (isAvailable) {
+            await Sharing.shareAsync(fileUri, {
+              mimeType: 'application/json',
+              dialogTitle: 'La bax xogta Dhambaal',
+              UTI: 'public.json',
+            });
+          } else {
+            Alert.alert('Qalad', 'Sharing ma ahan mid diyaar ah aaladaada.');
+          }
         }
       }
     } catch (err: any) {
@@ -275,25 +391,31 @@ export default function AnigaScreen() {
   };
 
   const handleExportData = () => {
-    Alert.alert(
-      'Labax Xogta (Export)',
-      'Halkee rabtaa in aad la aado xogtaada?',
-      [
-        {
-          text: 'Web (Kaliya Aqoonsiga)',
-          onPress: () => performExport('web'),
-        },
-        {
-          text: 'Mobile (Dhamaan Xogta)',
-          onPress: () => performExport('mobile'),
-        },
-        {
-          text: 'Jooji',
-          style: 'cancel'
+    if (!hasPin) {
+      if (Platform.OS === 'web') {
+        const confirmPin = window.confirm(
+          'Amniga Xogta\n\nFadlan Xogtaada si aad ula baxdo waa in aad sameystaaa fure sireed si loo ilaaliyo aming xogta'
+        );
+        if (confirmPin) {
+          setShowPinModal(true);
         }
-      ],
-      { cancelable: true }
-    );
+      } else {
+        Alert.alert(
+          'Amniga Xogta',
+          'Fadlan Xogtaada si aad ula baxdo waa in aad sameystaaa fure sireed si loo ilaaliyo aming xogta',
+          [
+            { text: 'Samee Fure', onPress: () => { setShowPinModal(true); } },
+            { text: 'Kansal', style: 'cancel' }
+          ]
+        );
+      }
+      return;
+    }
+
+    // Directly open the PIN verification screen for security
+    setExportTarget(Platform.OS === 'web' ? 'web' : 'mobile');
+    setExportPinInput('');
+    setShowExportVerifyModal(true);
   };
 
   useEffect(() => {
@@ -340,6 +462,29 @@ export default function AnigaScreen() {
           setCustomRelays(savedRelays);
         }
         setRelayStats(savedStats);
+
+        const storedPinHash = await AsyncStorage.getItem('rdhambaal_export_pin_hash');
+        const hasSecurityPin = storedPinHash !== null;
+        setHasPin(hasSecurityPin);
+        if (!hasSecurityPin) {
+          if (Platform.OS === 'web') {
+            const confirmPin = window.confirm(
+              'Digniin Amni\n\nFadlan waxaa la rabaa in ad sameysato fure sireed si loo sugo amniga xogta'
+            );
+            if (confirmPin) {
+              setShowPinModal(true);
+            }
+          } else {
+            Alert.alert(
+              'Digniin Amni',
+              'Fadlan waxaa la rabaa in ad sameysato fure sireed si loo sugo amniga xogta',
+              [
+                { text: 'Kansal', style: 'cancel' },
+                { text: 'Samee Fure', onPress: () => setShowPinModal(true) }
+              ]
+            );
+          }
+        }
       } catch (err) {
         console.error('Error loading settings:', err);
       }
@@ -490,14 +635,22 @@ export default function AnigaScreen() {
 
     // Slide-up Modal Styles (Perfect for both Mobile & Web)
     modalOverlay: {
-      ...StyleSheet.absoluteFillObject,
+      position: 'absolute',
+      top: 0,
+      left: 0,
+      right: 0,
+      bottom: 0,
       backgroundColor: Colors.glassOverlayBg,
       justifyContent: 'flex-end',
       alignItems: 'center',
       zIndex: 9999,
     },
     modalDismissArea: {
-      ...StyleSheet.absoluteFillObject,
+      position: 'absolute',
+      top: 0,
+      left: 0,
+      right: 0,
+      bottom: 0,
     },
     modalContent: {
       width: '100%',
@@ -880,6 +1033,12 @@ export default function AnigaScreen() {
           onPress={() => {
             if (s.icon.includes('notifications')) setActiveModal('notifications');
             if (s.icon.includes('shield')) setActiveModal('security');
+            if (s.icon.includes('key')) {
+              setOldPinInput('');
+              setNewPinInput('');
+              setConfirmPinInput('');
+              setShowPinModal(true);
+            }
             if (s.icon.includes('color-palette')) setActiveModal('appearance');
             if (s.icon.includes('globe')) setActiveModal('connection');
             if (s.icon.includes('download')) handleExportData();
@@ -1193,22 +1352,51 @@ const RelayDashboard = ({
                   style={styles.wipeButton} 
                   activeOpacity={0.8}
                   onPress={() => {
-                    Alert.alert(
-                      'Miyad hubtaa?',
-                      'Kani wuxuu gebi ahaanba tirtirayaa furayaashaada iyo xogtaada. Ma awoodi doontid inaad dib u soo ceshato haddii aadan haysan 12-ka erey ee seeds-ka ah!',
-                      [
-                        { text: 'Cancel', style: 'cancel' },
-                        { 
-                          text: 'Haa, Tirtir', 
-                          style: 'destructive',
-                          onPress: async () => {
-                            await AsyncStorage.clear();
-                            setActiveModal(null);
-                            router.replace('/');
+                    const performWipe = async () => {
+                      try {
+                        await handleEndCall();
+                      } catch (e) {
+                        console.warn('Error ending call on account wipe:', e);
+                      }
+                      try {
+                        shutdownConnectionService();
+                      } catch (e) {
+                        console.warn('Error shutting down connection service on account wipe:', e);
+                      }
+                      try {
+                        await wipeAllData();
+                      } catch (e) {
+                        console.warn('Error wiping database on account wipe:', e);
+                      }
+                      setActiveModal(null);
+                      if (Platform.OS === 'web') {
+                        window.location.href = '/';
+                      } else {
+                        router.replace('/');
+                      }
+                    };
+
+                    if (Platform.OS === 'web') {
+                      const confirmWipe = window.confirm(
+                        'Miyad hubtaa?\n\nKani wuxuu gebi ahaanba tirtirayaa furayaashaada iyo xogtaada. Ma awoodi doontid inaad dib u soo ceshato haddii aadan haysan 12-ka erey ee seeds-ka ah!'
+                      );
+                      if (confirmWipe) {
+                        performWipe();
+                      }
+                    } else {
+                      Alert.alert(
+                        'Miyad hubtaa?',
+                        'Kani wuxuu gebi ahaanba tirtirayaa furayaashaada iyo xogtaada. Ma awoodi doontid inaad dib u soo ceshato haddii aadan haysan 12-ka erey ee seeds-ka ah!',
+                        [
+                          { text: 'Cancel', style: 'cancel' },
+                          { 
+                            text: 'Haa, Tirtir', 
+                            style: 'destructive',
+                            onPress: performWipe
                           }
-                        }
-                      ]
-                    );
+                        ]
+                      );
+                    }
                   }}
                 >
                   <Ionicons name="trash-outline" size={18} color="#FF6B6B" />
@@ -1264,22 +1452,33 @@ const RelayDashboard = ({
                   setShowAddRelayModal(true);
                 }}
                 onDeleteRelay={async (relayId) => {
-                  Alert.alert(
-                    'Tirtir Relay',
-                    'Miyad hubtaa in aad relay-kan tirtirto?',
-                    [
-                      { text: 'Maya', style: 'cancel' },
-                      { text: 'Haa, Tirtir', style: 'destructive', onPress: async () => {
-                        const updated = customRelays.filter(r => r.id !== relayId);
-                        setCustomRelays(updated);
-                        await saveCustomRelays(updated);
-                        const stats = { ...relayStats };
-                        delete stats[relayId];
-                        setRelayStats(stats);
-                        await AsyncStorage.setItem('CUSTOM_TURN_STATS', JSON.stringify(stats));
-                      }}
-                    ]
-                  );
+                  const performDelete = async () => {
+                    const updated = customRelays.filter(r => r.id !== relayId);
+                    setCustomRelays(updated);
+                    await saveCustomRelays(updated);
+                    const stats = { ...relayStats };
+                    delete stats[relayId];
+                    setRelayStats(stats);
+                    await AsyncStorage.setItem('CUSTOM_TURN_STATS', JSON.stringify(stats));
+                  };
+
+                  if (Platform.OS === 'web') {
+                    const confirmDelete = window.confirm(
+                      'Tirtir Relay\n\nMiyad hubtaa in aad relay-kan tirtirto?'
+                    );
+                    if (confirmDelete) {
+                      performDelete();
+                    }
+                  } else {
+                    Alert.alert(
+                      'Tirtir Relay',
+                      'Miyad hubtaa in aad relay-kan tirtirto?',
+                      [
+                        { text: 'Maya', style: 'cancel' },
+                        { text: 'Haa, Tirtir', style: 'destructive', onPress: performDelete }
+                      ]
+                    );
+                  }
                 }}
                 onToggleEnabled={async (relayId, enabled) => {
                   const updated = customRelays.map(r => r.id === relayId ? { ...r, enabled } : r);
@@ -1299,100 +1498,295 @@ const RelayDashboard = ({
     );
   };
 
+  const handleSavePin = async () => {
+    const old = oldPinInput.trim();
+    const newPin = newPinInput.trim();
+    const confirm = confirmPinInput.trim();
+
+    if (hasPin) {
+      if (!old) {
+        Alert.alert('Cillad', 'Fadlan geli fure sireedkii hore.');
+        return;
+      }
+      const storedHash = await AsyncStorage.getItem('rdhambaal_export_pin_hash');
+      const enteredOldHash = await Gun.SEA.work(old, null, null, { name: 'SHA-256' });
+      if (storedHash !== enteredOldHash) {
+        Alert.alert('Cillad', 'Fure sireedkii hore waa qalad!');
+        return;
+      }
+    }
+
+    if (!newPin) {
+      Alert.alert('Cillad', 'Fadlan geli fure sireedka cusub.');
+      return;
+    }
+    if (newPin.length < 4) {
+      Alert.alert('Cillad', 'Fure sireedku waa inuu ka koobnaadaa/lahaadaa ugu yaraan 4 xaraf/tiro.');
+      return;
+    }
+    if (newPin !== confirm) {
+      Alert.alert('Cillad', 'Fure sireedka cusub iyo kan xaqiijinta ma waafaqsana.');
+      return;
+    }
+
+    try {
+      const pinHash = await Gun.SEA.work(newPin, null, null, { name: 'SHA-256' });
+      await AsyncStorage.setItem('rdhambaal_export_pin_hash', pinHash);
+      setHasPin(true);
+      setShowPinModal(false);
+      
+      setOldPinInput('');
+      setNewPinInput('');
+      setConfirmPinInput('');
+      
+      Alert.alert('Guul', 'Fure sireedkii waa la keydiyay!');
+    } catch (e) {
+      Alert.alert('Cillad', 'Ma awoodin inaan kaydiyo fure sireedka.');
+    }
+  };
+
+  const handleVerifyPinAndExport = async () => {
+    const pin = exportPinInput.trim();
+    if (!pin) {
+      Alert.alert('Cillad', 'Fadlan geli fure sireedkaaga.');
+      return;
+    }
+
+    try {
+      const storedHash = await AsyncStorage.getItem('rdhambaal_export_pin_hash');
+      const enteredHash = await Gun.SEA.work(pin, null, null, { name: 'SHA-256' });
+      if (storedHash !== enteredHash) {
+        Alert.alert('Cillad', 'Fure sireedku waa qalad!');
+        return;
+      }
+
+      setShowExportVerifyModal(false);
+      setExportPinInput('');
+      
+      if (exportTarget) {
+        performExport(exportTarget, pin);
+      }
+    } catch (e) {
+      Alert.alert('Cillad', 'Cillad ayaa dhacday inta lagu guda jiray xaqiijinta.');
+    }
+  };
+
+  const renderPinModal = () => {
+    if (!showPinModal) return null;
+    return (
+      <Modal visible={true} animationType="slide" transparent={true}>
+        <View style={styles.modalOverlay}>
+          <TouchableOpacity style={styles.modalDismissArea} onPress={() => setShowPinModal(false)} activeOpacity={1} />
+          <GlassPanel style={[styles.modalContent, isWeb && styles.modalContentWeb]}>
+            <View style={styles.modalHeader}>
+              <View style={{ flexDirection: 'row', alignItems: 'center', gap: Spacing.xs }}>
+                <Ionicons name="key-outline" size={20} color={Colors.onSurface} />
+                <Text style={styles.modalTitle}>Habaynta Fure Sireedka</Text>
+              </View>
+              <TouchableOpacity onPress={() => setShowPinModal(false)} style={styles.modalCloseBtn}>
+                <Ionicons name="close" size={20} color={Colors.onSurface} />
+              </TouchableOpacity>
+            </View>
+            <ScrollView style={styles.modalBody} showsVerticalScrollIndicator={false}>
+              {hasPin ? (
+                <View style={styles.modalOptionGroup}>
+                  <Text style={styles.keyLabel}>Fure Sireed-kii Hore</Text>
+                  <TextInput
+                    style={styles.inputField}
+                    placeholder="Gali fure sireed-kii hore"
+                    placeholderTextColor={Colors.onSurfaceVariant}
+                    secureTextEntry
+                    value={oldPinInput}
+                    onChangeText={setOldPinInput}
+                  />
+                </View>
+              ) : (
+                <View style={{ backgroundColor: 'rgba(255,107,107,0.15)', padding: Spacing.sm, borderRadius: 8, marginBottom: Spacing.md }}>
+                  <Text style={{ ...Typography.bodySm, color: '#FF8B8B', fontSize: 13, lineHeight: 18 }}>
+                    Digniin: fadlan haddii aad hilmaato fure sireed-kan ma awoodi doontid in xogtaada la baxdo.
+                  </Text>
+                </View>
+              )}
+
+              <View style={styles.modalOptionGroup}>
+                <Text style={styles.keyLabel}>{hasPin ? 'Fure Sireed-ka Cusub' : 'Gali Fure Sireed Cusub'}</Text>
+                <TextInput
+                  style={styles.inputField}
+                  placeholder="Gali fure sireed cusub"
+                  placeholderTextColor={Colors.onSurfaceVariant}
+                  secureTextEntry
+                  value={newPinInput}
+                  onChangeText={setNewPinInput}
+                />
+              </View>
+
+              <View style={styles.modalOptionGroup}>
+                <Text style={styles.keyLabel}>Xaqiiji Fure Sireed-ka Cusub</Text>
+                <TextInput
+                  style={styles.inputField}
+                  placeholder="Xaqiiji fure sireed-ka cusub"
+                  placeholderTextColor={Colors.onSurfaceVariant}
+                  secureTextEntry
+                  value={confirmPinInput}
+                  onChangeText={setConfirmPinInput}
+                />
+              </View>
+
+              <TouchableOpacity 
+                style={[styles.saveButton, { marginTop: Spacing.md }]}
+                onPress={handleSavePin}
+              >
+                <Text style={styles.saveButtonText}>Kaydi Furaha</Text>
+              </TouchableOpacity>
+            </ScrollView>
+          </GlassPanel>
+        </View>
+      </Modal>
+    );
+  };
+
+  const renderExportVerifyModal = () => {
+    if (!showExportVerifyModal) return null;
+    return (
+      <Modal visible={true} animationType="slide" transparent={true}>
+        <View style={styles.modalOverlay}>
+          <TouchableOpacity style={styles.modalDismissArea} onPress={() => setShowExportVerifyModal(false)} activeOpacity={1} />
+          <GlassPanel style={[styles.modalContent, isWeb && styles.modalContentWeb]}>
+            <View style={styles.modalHeader}>
+              <View style={{ flexDirection: 'row', alignItems: 'center', gap: Spacing.xs }}>
+                <Ionicons name="shield-checkmark-outline" size={20} color={Colors.onSurface} />
+                <Text style={styles.modalTitle}>Xaqiijinta Amniga</Text>
+              </View>
+              <TouchableOpacity onPress={() => setShowExportVerifyModal(false)} style={styles.modalCloseBtn}>
+                <Ionicons name="close" size={20} color={Colors.onSurface} />
+              </TouchableOpacity>
+            </View>
+            <ScrollView style={styles.modalBody} showsVerticalScrollIndicator={false}>
+              <Text style={[styles.modalSubtitle, { marginBottom: Spacing.md }]}>
+                Fadlan geli fure sireed-kaaga si loo xaqiijiyo xogta oo loo bilaabo labixida xogta.
+              </Text>
+
+              <View style={styles.modalOptionGroup}>
+                <Text style={styles.keyLabel}>Fure Sireed-kaaga</Text>
+                <TextInput
+                  style={styles.inputField}
+                  placeholder="Gali fure sireedkaaga"
+                  placeholderTextColor={Colors.onSurfaceVariant}
+                  secureTextEntry
+                  value={exportPinInput}
+                  onChangeText={setExportPinInput}
+                />
+              </View>
+
+              <TouchableOpacity 
+                style={[styles.saveButton, { marginTop: Spacing.md }]}
+                onPress={handleVerifyPinAndExport}
+              >
+                <Text style={styles.saveButtonText}>Xaqiiji & Labax Xogta</Text>
+              </TouchableOpacity>
+            </ScrollView>
+          </GlassPanel>
+        </View>
+      </Modal>
+    );
+  };
+
   // Add/Edit Relay Modal
   const renderAddEditRelayModal = () => {
     if (!showAddRelayModal) return null;
 
     return (
       <Modal visible={true} animationType="slide" transparent={true}>
-        <TouchableOpacity style={styles.modalOverlay} onPress={() => { setShowAddRelayModal(false); setEditingRelayId(null); }} activeOpacity={1} />
-        <GlassPanel style={[styles.modalContent, isWeb && styles.modalContentWeb]}>
-          <View style={styles.modalHeader}>
-            <Text style={styles.modalTitle}>
-              {editingRelayId ? 'Edit Relay' : 'Add Custom Relay'}
-            </Text>
-            <TouchableOpacity onPress={() => { setShowAddRelayModal(false); setEditingRelayId(null); }} style={styles.modalCloseBtn}>
-              <Ionicons name="close" size={20} color={Colors.onSurface} />
-            </TouchableOpacity>
-          </View>
-          <ScrollView style={styles.modalBody} showsVerticalScrollIndicator={false}>
-            <Text style={styles.modalSubtitle}>
-              {editingRelayId ? 'Update your TURN server settings' : 'Configure your own TURN server for maximum privacy'}
-            </Text>
-
-            <View style={styles.modalOptionGroup}>
-              <Text style={styles.keyLabel}>Relay Name</Text>
-              <TextInput
-                style={styles.inputField}
-                placeholder="My Relay Server"
-                value={newRelayForm.name}
-                onChangeText={(text) => setNewRelayForm(prev => ({ ...prev, name: text }))}
-                autoCapitalize="words"
-              />
-
-              <Text style={styles.keyLabel}>Relay URLs (one per line)</Text>
-              {newRelayForm.urls.map((url, idx) => (
-                <View key={idx} style={{ flexDirection: 'row', gap: Spacing.xs, marginBottom: Spacing.xs }}>
-                  <TextInput
-                    style={[styles.inputField, { flex: 1 }]}
-                    placeholder={`turn:server.com:3478 (URL ${idx + 1})`}
-                    placeholderTextColor={Colors.onSurfaceVariant}
-                    value={url}
-                    onChangeText={(text) => handleUrlChange(idx, text)}
-                    autoCapitalize="none"
-                  />
-                  {newRelayForm.urls.length > 1 && (
-                    <TouchableOpacity 
-                      onPress={() => handleRemoveUrl(idx)} 
-                      style={styles.actionButton}
-                      activeOpacity={0.7}
-                    >
-                      <Ionicons name="close-circle-outline" size={24} color="#FF6B6B" />
-                    </TouchableOpacity>
-                  )}
-                </View>
-              ))}
-              <TouchableOpacity 
-                onPress={handleAddUrl} 
-                style={[styles.addRelayButton, { marginTop: Spacing.xs, backgroundColor: Colors.glassPanelBg }]}
-                activeOpacity={0.8}
-              >
-                <Ionicons name="add-outline" size={18} color={Colors.primary} />
-                <Text style={styles.addRelayButtonText}>Add Another URL</Text>
-              </TouchableOpacity>
-
-              <Text style={styles.keyLabel}>Username (optional)</Text>
-              <TextInput
-                style={styles.inputField}
-                placeholder="Username"
-                placeholderTextColor={Colors.onSurfaceVariant}
-                value={newRelayForm.username}
-                onChangeText={(text) => setNewRelayForm(prev => ({ ...prev, username: text }))}
-                autoCapitalize="none"
-              />
-
-              <Text style={styles.keyLabel}>Password (optional)</Text>
-              <TextInput
-                style={styles.inputField}
-                placeholder="Password"
-                placeholderTextColor={Colors.onSurfaceVariant}
-                secureTextEntry
-                value={newRelayForm.password}
-                onChangeText={(text) => setNewRelayForm(prev => ({ ...prev, password: text }))}
-                autoCapitalize="none"
-              />
-
-              <TouchableOpacity 
-                style={styles.saveButton}
-                onPress={saveRelay}
-              >
-                <Text style={styles.saveButtonText}>
-                  {editingRelayId ? 'Save Changes' : 'Add Relay'}
-                </Text>
+        <View style={styles.modalOverlay}>
+          <TouchableOpacity style={styles.modalDismissArea} onPress={() => { setShowAddRelayModal(false); setEditingRelayId(null); }} activeOpacity={1} />
+          <GlassPanel style={[styles.modalContent, isWeb && styles.modalContentWeb]}>
+            <View style={styles.modalHeader}>
+              <Text style={styles.modalTitle}>
+                {editingRelayId ? 'Edit Relay' : 'Add Custom Relay'}
+              </Text>
+              <TouchableOpacity onPress={() => { setShowAddRelayModal(false); setEditingRelayId(null); }} style={styles.modalCloseBtn}>
+                <Ionicons name="close" size={20} color={Colors.onSurface} />
               </TouchableOpacity>
             </View>
-          </ScrollView>
-        </GlassPanel>
+            <ScrollView style={styles.modalBody} showsVerticalScrollIndicator={false}>
+              <Text style={styles.modalSubtitle}>
+                {editingRelayId ? 'Update your TURN server settings' : 'Configure your own TURN server for maximum privacy'}
+              </Text>
+
+              <View style={styles.modalOptionGroup}>
+                <Text style={styles.keyLabel}>Relay Name</Text>
+                <TextInput
+                  style={styles.inputField}
+                  placeholder="My Relay Server"
+                  value={newRelayForm.name}
+                  onChangeText={(text) => setNewRelayForm(prev => ({ ...prev, name: text }))}
+                  autoCapitalize="words"
+                />
+
+                <Text style={styles.keyLabel}>Relay URLs (one per line)</Text>
+                {newRelayForm.urls.map((url, idx) => (
+                  <View key={idx} style={{ flexDirection: 'row', gap: Spacing.xs, marginBottom: Spacing.xs }}>
+                    <TextInput
+                      style={[styles.inputField, { flex: 1 }]}
+                      placeholder={`turn:server.com:3478 (URL ${idx + 1})`}
+                      placeholderTextColor={Colors.onSurfaceVariant}
+                      value={url}
+                      onChangeText={(text) => handleUrlChange(idx, text)}
+                      autoCapitalize="none"
+                    />
+                    {newRelayForm.urls.length > 1 && (
+                      <TouchableOpacity 
+                        onPress={() => handleRemoveUrl(idx)} 
+                        style={styles.actionButton}
+                        activeOpacity={0.7}
+                      >
+                        <Ionicons name="close-circle-outline" size={24} color="#FF6B6B" />
+                      </TouchableOpacity>
+                    )}
+                  </View>
+                ))}
+                <TouchableOpacity 
+                  onPress={handleAddUrl} 
+                  style={[styles.addRelayButton, { marginTop: Spacing.xs, backgroundColor: Colors.glassPanelBg }]}
+                  activeOpacity={0.8}
+                >
+                  <Ionicons name="add-outline" size={18} color={Colors.primary} />
+                  <Text style={styles.addRelayButtonText}>Add Another URL</Text>
+                </TouchableOpacity>
+
+                <Text style={styles.keyLabel}>Username (optional)</Text>
+                <TextInput
+                  style={styles.inputField}
+                  placeholder="Username"
+                  placeholderTextColor={Colors.onSurfaceVariant}
+                  value={newRelayForm.username}
+                  onChangeText={(text) => setNewRelayForm(prev => ({ ...prev, username: text }))}
+                  autoCapitalize="none"
+                />
+
+                <Text style={styles.keyLabel}>Password (optional)</Text>
+                <TextInput
+                  style={styles.inputField}
+                  placeholder="Password"
+                  placeholderTextColor={Colors.onSurfaceVariant}
+                  secureTextEntry
+                  value={newRelayForm.password}
+                  onChangeText={(text) => setNewRelayForm(prev => ({ ...prev, password: text }))}
+                  autoCapitalize="none"
+                />
+
+                <TouchableOpacity 
+                  style={styles.saveButton}
+                  onPress={saveRelay}
+                >
+                  <Text style={styles.saveButtonText}>
+                    {editingRelayId ? 'Save Changes' : 'Add Relay'}
+                  </Text>
+                </TouchableOpacity>
+              </View>
+            </ScrollView>
+          </GlassPanel>
+        </View>
       </Modal>
     );
   };
@@ -1401,7 +1795,7 @@ const RelayDashboard = ({
     <WebSidebarLayout activeRoute="/(tabs)/aniga">
       <View style={styles.screenBg}>
         {!isWeb && (
-          <SafeAreaView style={{ paddingTop: Platform.OS === 'android' ? StatusBar.currentHeight ?? 0 : 0 }}>
+          <SafeAreaView edges={['top', 'left', 'right']}>
             <MadaxaMobilka ciwaan="Dhambaal" showSearchIcon={false} />
           </SafeAreaView>
         )}
@@ -1411,6 +1805,10 @@ const RelayDashboard = ({
         {renderSettingsModal()}
         {/* Render Add/Edit Relay Modal */}
         {renderAddEditRelayModal()}
+        {/* Render PIN setup modal */}
+        {renderPinModal()}
+        {/* Render Export Verify modal */}
+        {renderExportVerifyModal()}
       </View>
     </WebSidebarLayout>
   );

@@ -159,7 +159,6 @@ export const getVoicePlaybackUri = async (voiceNote) => {
     try {
       const base64 = voiceStorage.getVoiceAudio(voiceNote.msgId);
       let mimeType = voiceStorage.getVoiceMimeType(voiceNote.msgId) || 'audio/m4a';
-      if (mimeType === 'audio/m4a') mimeType = 'audio/mp4'; // Fallback to mp4 container
       
       if (base64) {
         // Convert to Blob URL for better browser compatibility
@@ -169,8 +168,15 @@ export const getVoicePlaybackUri = async (voiceNote) => {
           byteNumbers[i] = byteCharacters.charCodeAt(i);
         }
         const byteArray = new Uint8Array(byteNumbers);
-        // Try audio/mp4, if the browser rejects it, the Audio tag is more lenient with Blobs
-        const blob = new Blob([byteArray], { type: mimeType });
+        
+        // On Web, if the source is from mobile ('audio/m4a' or 'audio/mp4'),
+        // browsers are much more successful at decoding if we specify the standard 'audio/x-m4a' MIME type.
+        let blobType = mimeType;
+        if (blobType === 'audio/m4a' || blobType === 'audio/mp4') {
+          blobType = 'audio/x-m4a';
+        }
+        
+        const blob = new Blob([byteArray], { type: blobType });
         return URL.createObjectURL(blob);
       }
     } catch (e) {

@@ -9,8 +9,9 @@
 
 import React, { useState, useRef, useMemo, useEffect } from 'react';
 import {
-  View, Text, FlatList, TouchableOpacity, StyleSheet, Platform, SafeAreaView, StatusBar, TextInput,
+  View, Text, FlatList, TouchableOpacity, StyleSheet, Platform, StatusBar, TextInput,
 } from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import * as DocumentPicker from 'expo-document-picker';
 import { useRouter, useLocalSearchParams } from 'expo-router';
@@ -217,27 +218,49 @@ function WebChatPanel({ chat, styles }: { chat: ChatItem, styles: any }) {
         const sound = await playVoiceNote(voiceNote.audioUri);
         currentSoundRef.current = sound;
         setActiveVoiceMsgId(voiceNote.msgId);
-        sound.setOnPlaybackStatusUpdate((status: any) => {
-          if (status.didJustFinish) {
-            stopSound(sound);
+        if (Platform.OS === 'web') {
+          sound.onended = () => {
             currentSoundRef.current = null;
             setActiveVoiceMsgId(null);
-          }
-        });
+          };
+        } else {
+          sound.setOnPlaybackStatusUpdate((status: any) => {
+            if (status.didJustFinish) {
+              stopSound(sound);
+              currentSoundRef.current = null;
+              setActiveVoiceMsgId(null);
+            }
+          });
+        }
       }
       return;
     }
 
     // If tapping the same voice note, toggle pause/resume
     if (voiceNote.msgId === activeVoiceMsgId && currentSoundRef.current) {
-      const status = await currentSoundRef.current.getStatusAsync();
-      if (status.isLoaded) {
-        if (status.isPlaying) {
-          await currentSoundRef.current.pauseAsync();
+      if (Platform.OS === 'web') {
+        const audio = currentSoundRef.current;
+        if (!audio.paused) {
+          audio.pause();
           setActiveVoiceMsgId(null);
         } else {
-          await currentSoundRef.current.playAsync();
-          setActiveVoiceMsgId(voiceNote.msgId);
+          try {
+            await audio.play();
+            setActiveVoiceMsgId(voiceNote.msgId);
+          } catch (e) {
+            console.error('[Web] Failed to resume voice note:', e);
+          }
+        }
+      } else {
+        const status = await currentSoundRef.current.getStatusAsync();
+        if (status.isLoaded) {
+          if (status.isPlaying) {
+            await currentSoundRef.current.pauseAsync();
+            setActiveVoiceMsgId(null);
+          } else {
+            await currentSoundRef.current.playAsync();
+            setActiveVoiceMsgId(voiceNote.msgId);
+          }
         }
       }
       return;
@@ -508,6 +531,16 @@ export default function FariimhaScreen() {
     }
   }, [params.chatId, chats, isWeb]);
 
+  // Keep activeChat state synchronized with updates in the chats list (e.g. online status changes)
+  useEffect(() => {
+    if (activeChat && activeChat.id) {
+      const latest = chats.find(c => c.id === activeChat.id);
+      if (latest && (latest.status !== activeChat.status || latest.name !== activeChat.name)) {
+        setActiveChat(latest);
+      }
+    }
+  }, [chats]);
+
   useEffect(() => {
     if (isWeb && activeChat?.id) {
       global.currentChatId = activeChat.id;
@@ -680,7 +713,7 @@ export default function FariimhaScreen() {
             )}
           </View>
         ) : (
-          <SafeAreaView style={{ flex: 1, paddingTop: Platform.OS === 'android' ? StatusBar.currentHeight ?? 0 : 0 }}>
+          <SafeAreaView style={{ flex: 1 }} edges={['top', 'left', 'right']}>
             <MadaxaMobilka 
               ciwaan="Dhambaal"
               isSearching={isSearching} 

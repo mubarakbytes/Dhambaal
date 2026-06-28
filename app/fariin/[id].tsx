@@ -1,9 +1,10 @@
 import React, { useState, useRef, useEffect } from 'react';
 import {
   View, Text, TextInput, TouchableOpacity, FlatList,
-  StyleSheet, Platform, SafeAreaView, StatusBar, KeyboardAvoidingView, Alert,
+  StyleSheet, Platform, StatusBar, KeyboardAvoidingView, Alert,
   ActivityIndicator, Modal
 } from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
 import * as DocumentPicker from 'expo-document-picker';
 import * as FileSystem from 'expo-file-system/legacy';
 import { Ionicons } from '@expo/vector-icons';
@@ -56,7 +57,7 @@ export default function FariinScreen() {
   const allMessagesRef = useRef<Message[]>([]);
   const allRawRef = useRef<any[]>([]);
   const totalDisplayedRef = useRef(PAGE_SIZE);
-  const lastListLengthRef = useRef(0);
+  const listSignatureRef = useRef('');
   const isAtBottomRef = useRef(true);
   const isPaginatingRef = useRef(false);
   const [displayedMessages, setDisplayedMessages] = useState<Message[]>([]);
@@ -154,8 +155,10 @@ export default function FariinScreen() {
 
     let cancelled = false;
     const cleanupPromise = listenToMessages(id, (list) => {
-      if (cancelled || list.length === lastListLengthRef.current) return;
-      lastListLengthRef.current = list.length;
+      if (cancelled) return;
+      const signature = list.map(m => `${m.id}_${m.status}_${m.fileUri || ''}_${m.isDeleted ? '1' : '0'}`).join('|');
+      if (signature === listSignatureRef.current) return;
+      listSignatureRef.current = signature;
       allRawRef.current = list;
       showSlice(list, totalDisplayedRef.current);
     });
@@ -624,7 +627,7 @@ export default function FariinScreen() {
       for (const msg of allRawRef.current) {
         if (msg.id) deleteMessage(id, msg.id);
       }
-      lastListLengthRef.current = 0;
+      listSignatureRef.current = '';
       allRawRef.current = [];
       allMessagesRef.current = [];
       setDisplayedMessages([]);
@@ -647,7 +650,7 @@ export default function FariinScreen() {
   const renderConnectionStatus = () => <StatusChip connectionStatus={connectionStatus} />;
 
   return (
-    <SafeAreaView style={[styles.safe, { paddingTop: Platform.OS === 'android' ? StatusBar.currentHeight ?? 0 : 0 }]}>
+    <SafeAreaView style={styles.safe} edges={['top', 'bottom', 'left', 'right']}>
       <KeyboardAvoidingView
         style={styles.flex}
         behavior={Platform.OS === 'ios' ? 'padding' : 'height'}

@@ -287,6 +287,19 @@ export const saveMessageList = async (messagesList) => {
 };
 
 /**
+ * Waxay ku raadisaa fariin gaar ah id-keeda.
+ */
+export const getMessageById = async (msgId) => {
+  try {
+    const messages = await getStoredMessages();
+    return messages.find(m => m.id === msgId) || null;
+  } catch (e) {
+    console.error('Error getting message by ID:', e);
+    return null;
+  }
+};
+
+/**
  * Waxay ku dartaa fariin cusub AsyncStorage iyo GunDB (iyadoo laga fogaanayo in fariimaha is dul saarmaan).
  */
 let messageMutationChain = Promise.resolve();
@@ -295,19 +308,34 @@ export const addMessageToDatabase = async (newMessage) => {
   messageMutationChain = messageMutationChain.then(async () => {
     try {
       const messages = await getStoredMessages();
-    const exists = messages.some(msg => msg.id === newMessage.id);
-    
-    if (!exists) {
-      messages.push(newMessage);
-      await saveMessageList(messages);
-      DeviceEventEmitter.emit('new_local_message', newMessage);
+      const index = messages.findIndex(msg => msg.id === newMessage.id);
+      
+      if (index === -1) {
+        messages.push(newMessage);
+        await saveMessageList(messages);
+        DeviceEventEmitter.emit('new_local_message', newMessage);
+      } else {
+        const oldMsg = messages[index];
+        let hasChanges = false;
+        
+        for (const key in newMessage) {
+          if (newMessage[key] !== undefined && newMessage[key] !== oldMsg[key]) {
+            oldMsg[key] = newMessage[key];
+            hasChanges = true;
+          }
+        }
+        
+        if (hasChanges) {
+          await saveMessageList(messages);
+          DeviceEventEmitter.emit('new_local_message', oldMsg);
+        }
+      }
+      
+      // Ku dar local GunDB
+      gun.get('messages').get(newMessage.id).put(newMessage);
+    } catch (error) {
+      console.error('Error adding message to database:', error);
     }
-    
-    // Ku dar local GunDB
-    gun.get('messages').get(newMessage.id).put(newMessage);
-  } catch (error) {
-    console.error('Error adding message to database:', error);
-  }
   }).catch(e => console.error(e));
   return messageMutationChain;
 };
@@ -397,3 +425,62 @@ export const hydrateDatabase = async () => {
 
 // Hydrate database immediately
 hydrateDatabase();
+
+/**
+ * Gebi ahaanba wuxuu tirtiraa dhammaan xogta AsyncStorage iyo GunDB.
+ */
+export const wipeAllData = async () => {
+  try {
+    // 1. Get all stored items to nullify them in GunDB before we clear storage
+    const contacts = await getStoredContacts();
+    const contactRequests = await getStoredContactRequests();
+    const messages = await getStoredMessages();
+    const calls = await getStoredCalls();
+    const myPubKey = await getCleanPublicKey();
+
+    // 2. Clear AsyncStorage completely
+    await AsyncStorage.clear();
+
+    // 3. Nullify GunDB records so any active map/on UI listeners clear their state
+    if (myPubKey) {
+      contacts.forEach(c => {
+        if (c && c.id) {
+          const arr = [myPubKey, c.id].sort();
+          const roomId = `${arr[0]}_${arr[1]}`;
+          gun.get('rooms').get(roomId).put(null);
+        }
+      });
+    }
+
+    contacts.forEach(c => {
+      if (c && c.id) {
+        gun.get('contacts').get(c.id).put(null);
+      }
+    });
+
+    contactRequests.forEach(r => {
+      if (r && r.id) {
+        gun.get('contactRequests').get(r.id).put(null);
+      }
+    });
+
+    messages.forEach(m => {
+      if (m && m.id) {
+        gun.get('messages').get(m.id).put(null);
+      }
+    });
+
+    calls.forEach(c => {
+      if (c && c.id) {
+        gun.get('calls').get(c.id).put(null);
+      }
+    });
+
+    // Reset startup flag so next account hydration works correctly
+    isStartupResetDone = false;
+
+    console.log('[STORAGE] wipeAllData: AsyncStorage and GunDB cleared successfully.');
+  } catch (error) {
+    console.error('[STORAGE] Error in wipeAllData:', error);
+  }
+};

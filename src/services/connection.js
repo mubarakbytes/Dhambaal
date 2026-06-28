@@ -303,15 +303,31 @@ const monitorConnectionState = (friendPubKey, peerConnection, forceDefaultTurn) 
  */
 const addIceCandidateSafely = async (friendPubKey, peerConnection, candidateData) => {
   try {
+    if (!candidateData) return;
+
+    // Normalize candidate data for maximum cross-platform compatibility (Web/Mobile)
+    let normalized = null;
+    if (typeof candidateData === 'string') {
+      normalized = { candidate: candidateData };
+    } else {
+      normalized = {
+        candidate: candidateData.candidate,
+        sdpMid: candidateData.sdpMid || undefined,
+        sdpMLineIndex: candidateData.sdpMLineIndex !== null && candidateData.sdpMLineIndex !== undefined 
+          ? Number(candidateData.sdpMLineIndex) 
+          : undefined
+      };
+    }
+
     if (peerConnection.remoteDescription && peerConnection.remoteDescription.type) {
       // Remote description already set — add ICE candidate directly
-      await peerConnection.addIceCandidate(new NetworkPath(candidateData));
+      await peerConnection.addIceCandidate(new NetworkPath(normalized));
     } else {
       // Buffer it — we'll add it after setRemoteDescription
       if (!pendingIceCandidates.has(friendPubKey)) {
         pendingIceCandidates.set(friendPubKey, []);
       }
-      pendingIceCandidates.get(friendPubKey).push(candidateData);
+      pendingIceCandidates.get(friendPubKey).push(normalized);
       console.log(`[P2P] ICE candidate buffered (sugaya remote desc): ${friendPubKey.substring(0, 12)}...`);
     }
   } catch (e) {
@@ -771,8 +787,11 @@ export const startPresenceEngine = async () => {
   // Ensure MQTT is connected with LWT configured
   await connectToSignalingBroker(myPubKey);
 
-  // 1. Publish initial online status
+  // 1. Publish initial online status and start periodic heartbeat (kila 20 seconds)
   publishPresenceHeartbeat(myPubKey);
+  const heartbeatInterval = setInterval(() => {
+    publishPresenceHeartbeat(myPubKey);
+  }, 20000);
 
   // 2. Listen to contacts' presence
   const trackedContacts = new Set();
@@ -813,6 +832,7 @@ export const startPresenceEngine = async () => {
     console.log(`[Presence] Joojinaya mashiinka joogitaanka.`);
     clearInterval(contactCheckInterval);
     clearInterval(queueRetryInterval);
+    clearInterval(heartbeatInterval);
     trackedContacts.forEach((contactId) => unsubscribeFromPresence(contactId));
     trackedContacts.clear();
   };
@@ -820,3 +840,32 @@ export const startPresenceEngine = async () => {
 
 // ===================== INITIALIZE HOLE PUNCH REFERENCE =====================
 export const getActiveConnection = (pubKey) => activeConnections.get(pubKey);
+
+/**
+ * Xiraa dhammaan xiriirada WebRTC iyo broker-ka MQTT.
+ */
+export const shutdownConnectionService = () => {
+  console.log('[Presence] Shutting down connection service...');
+  
+  // 1. Dami dhammaan xiriirada WebRTC ee furan
+  activeConnections.forEach((conn, friendPubKey) => {
+    try {
+      if (conn.dataChannel) {
+        conn.dataChannel.close();
+      }
+      if (conn.peerConnection) {
+        conn.peerConnection.close();
+      }
+    } catch (e) {
+      console.warn('[Presence] Error closing peer connection:', e);
+    }
+  });
+  activeConnections.clear();
+
+  // 2. Ka saar xiriirka MQTT (Signaling broker)
+  try {
+    disconnectSignaling();
+  } catch (e) {
+    console.warn('[Presence] Error disconnecting signaling broker:', e);
+  }
+};

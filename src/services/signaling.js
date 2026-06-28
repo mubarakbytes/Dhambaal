@@ -87,10 +87,11 @@ export const connectToSignalingBroker = (myPublicKey = null) => {
       const willPayload = myPublicKey ? JSON.stringify({ status: 'offline', publicKey: myPublicKey }) : undefined;
 
       const isPersistent = !!myPublicKey;
+      const isWeb = Platform.OS === 'web';
 
       const client = mqtt.connect(broker.url, {
         clientId,
-        clean: !isPersistent, // clean: false enables persistent sessions on the broker
+        clean: isWeb ? true : !isPersistent, // clean: false enables persistent sessions on mobile; true on web
         connectTimeout: 15000,
         reconnectPeriod: 10000,
         keepalive: 30,

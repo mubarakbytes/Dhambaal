@@ -21,7 +21,7 @@ try {
   console.warn('[Messages] Notifee native module not found.');
 }
 
-import { gun, addMessageToDatabase, getCleanPublicKey, getStoredContacts, getStoredMessages } from './storage';
+import { gun, addMessageToDatabase, getMessageById, getCleanPublicKey, getStoredContacts, getStoredMessages } from './storage';
 import { sendMessageDirect, registerOnMessageReceived } from './connection';
 import { saveBase64ToFile } from './voiceNotes';
 import * as voiceStorage from './voiceStorage';
@@ -372,8 +372,10 @@ export const listenToActiveChats = (onChatsUpdate) => {
           ...contactNode
         };
       }
-      rebuildChatList();
+    } else {
+      delete contactsMap[key];
     }
+    rebuildChatList();
   });
 
   // 2. Dhegeyso fariimaha
@@ -413,39 +415,56 @@ registerOnMessageReceived(async (senderPubKey, rawMessageText) => {
       const completeBase64 = receiveFileChunk(incomingMsg);
       if (completeBase64) {
         const msgId = incomingMsg.msgId;
-        gun.get('messages').get(msgId).once(async (metaData) => {
-          if (metaData) {
-            let msgToSave = { ...metaData };
-            const audioData = completeBase64;
-            const audioMimeType = metaData.fileMimeType || 'application/octet-stream';
 
-            if (Platform.OS === 'web') {
-              await voiceStorage.storeVoiceAudioAsync(msgId, audioData);
-              voiceStorage.storeVoiceMimeType(msgId, audioMimeType);
-            }
-            msgToSave.fileUri = Platform.OS === 'web' ? null : await saveFileToDisk(audioData, metaData.fileName);
-            msgToSave.status = 'received';
+        const processFileSave = async (metaData) => {
+          if (!metaData) return;
+          let msgToSave = { ...metaData };
+          const audioData = completeBase64;
+          const audioMimeType = metaData.fileMimeType || 'application/octet-stream';
 
-            // Auto-save image to Gallery
-            if (Platform.OS !== 'web' && audioMimeType.startsWith('image/')) {
-              try {
-                const permission = await MediaLibrary.requestPermissionsAsync();
-                if (permission.granted && msgToSave.fileUri) {
-                  await MediaLibrary.saveToLibraryAsync(msgToSave.fileUri);
-                }
-              } catch (e) {
-                console.error('[Gallery] Failed to save image:', e);
-              }
-            }
-
-            await addMessageToDatabase(msgToSave);
-            gun.get('messages').get(msgId).put(msgToSave);
-            
-            const myPubKey = await getCleanPublicKey();
-            const roomId = getChatRoomId(myPubKey, senderPubKey);
-            gun.get('rooms').get(roomId).get('messages').get(msgId).put(msgToSave);
+          if (Platform.OS === 'web') {
+            await voiceStorage.storeVoiceAudioAsync(msgId, audioData);
+            voiceStorage.storeVoiceMimeType(msgId, audioMimeType);
           }
-        });
+          msgToSave.fileUri = Platform.OS === 'web' ? null : await saveFileToDisk(audioData, metaData.fileName);
+          msgToSave.status = 'received';
+
+          // Auto-save image to Gallery
+          if (Platform.OS !== 'web' && audioMimeType.startsWith('image/')) {
+            try {
+              const permission = await MediaLibrary.requestPermissionsAsync();
+              if (permission.granted && msgToSave.fileUri) {
+                await MediaLibrary.saveToLibraryAsync(msgToSave.fileUri);
+              }
+            } catch (e) {
+              console.error('[Gallery] Failed to save image:', e);
+            }
+          }
+
+          await addMessageToDatabase(msgToSave);
+          gun.get('messages').get(msgId).put(msgToSave);
+          
+          const myPubKey = await getCleanPublicKey();
+          const roomId = getChatRoomId(myPubKey, senderPubKey);
+          gun.get('rooms').get(roomId).get('messages').get(msgId).put(msgToSave);
+        };
+
+        // Try getting local metadata first (from AsyncStorage)
+        const localMeta = await getMessageById(msgId);
+        if (localMeta) {
+          console.log('[FILE] Found local file metadata, reconstructing...');
+          await processFileSave(localMeta);
+        } else {
+          // Fallback to GunDB once if not yet in local db
+          console.log('[FILE] Local metadata not found, fetching from GunDB...');
+          gun.get('messages').get(msgId).once(async (metaData) => {
+            if (metaData) {
+              await processFileSave(metaData);
+            } else {
+              console.warn('[FILE] Metadata not found in GunDB either for message:', msgId);
+            }
+          });
+        }
       }
       return;
     }
@@ -470,6 +489,11 @@ registerOnMessageReceived(async (senderPubKey, rawMessageText) => {
 
     // Handle voice messages: extract audio data, store separately, save clean
     let msgToSave = { ...incomingMsg, messageType: 'chat' };
+
+    if (incomingMsg.type === 'file') {
+      // Clear the sender's fileUri because the receiver has not downloaded the chunks yet.
+      msgToSave.fileUri = null;
+    }
 
     if (incomingMsg.type === 'voice' && incomingMsg.audioData) {
       const audioData = incomingMsg.audioData;

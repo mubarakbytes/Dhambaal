@@ -1,5 +1,5 @@
 import React, { useEffect, useState, memo } from 'react';
-import { View, Text, StyleSheet, TouchableOpacity, Platform, Image, Linking } from 'react-native';
+import { View, Text, StyleSheet, TouchableOpacity, Platform, Image, Linking, ActivityIndicator } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { Colors } from '../theme/colors';
 import { Typography } from '../theme/typography';
@@ -295,10 +295,16 @@ export const MessageBubble = memo(function MessageBubble({
               </View>
             ) : file.mimeType.startsWith('image/') ? (
               <View style={{ borderRadius: 8, overflow: 'hidden' }}>
-                <Image 
-                  source={{ uri: isWeb ? webImageUri : file.uri }} 
-                  style={{ width: 200, height: 200, resizeMode: 'cover' }} 
-                />
+                {(isWeb ? webImageUri : file.uri) ? (
+                  <Image 
+                    source={{ uri: isWeb ? webImageUri : file.uri }} 
+                    style={{ width: 200, height: 200, resizeMode: 'cover' }} 
+                  />
+                ) : (
+                  <View style={{ width: 200, height: 200, justifyContent: 'center', alignItems: 'center', backgroundColor: isSent ? 'rgba(255,255,255,0.1)' : 'rgba(0,0,0,0.05)' }}>
+                    <ActivityIndicator size="small" color={isSent ? '#ffffff' : Colors.primary} />
+                  </View>
+                )}
                 <View style={{ flexDirection: 'row', alignItems: 'center', marginTop: 4, gap: 4 }}>
                   <Ionicons name="image-outline" size={12} color={isSent ? Colors.sentBubbleText : Colors.onSurfaceVariant} />
                   <Text style={{ fontSize: 10, color: isSent ? Colors.sentBubbleText : Colors.onSurfaceVariant }}>{file.name}</Text>
@@ -306,10 +312,16 @@ export const MessageBubble = memo(function MessageBubble({
               </View>
             ) : (
               <View style={[styles.voiceNoteContainer, { backgroundColor: isSent ? 'rgba(255,255,255,0.2)' : Colors.surface, padding: 12, borderRadius: 8 }]}>
-                <Ionicons name="document-text" size={32} color={isSent ? Colors.sentBubbleText : Colors.primary} />
+                {(!isWeb && !file.uri) ? (
+                  <ActivityIndicator size="small" color={isSent ? '#ffffff' : Colors.primary} style={{ marginRight: 8 }} />
+                ) : (
+                  <Ionicons name="document-text" size={32} color={isSent ? Colors.sentBubbleText : Colors.primary} />
+                )}
                 <View style={{ marginLeft: 12, flex: 1 }}>
                   <Text style={{ ...Typography.bodyMd, color: isSent ? Colors.sentBubbleText : Colors.onSurface, fontWeight: 'bold' }} numberOfLines={1}>{file.name}</Text>
-                  <Text style={{ fontSize: 11, color: isSent ? 'rgba(255,255,255,0.7)' : Colors.onSurfaceVariant }}>{(file.size / 1024 / 1024).toFixed(2)} MB</Text>
+                  <Text style={{ fontSize: 11, color: isSent ? 'rgba(255,255,255,0.7)' : Colors.onSurfaceVariant }}>
+                    {(file.size / 1024 / 1024).toFixed(2)} MB {(!isWeb && !file.uri) && '• Soo dejinta xogta...'}
+                  </Text>
                 </View>
               </View>
             )}
